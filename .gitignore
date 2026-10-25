@@ -32,3 +32,4 @@ Packages/
 # CocoaPods / Carthage（如后续使用可取消注释）
 # Pod/
 # Carthage/Build/
+.zcode/
