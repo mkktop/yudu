@@ -108,12 +108,120 @@ final class LibraryService {
     return lib
   }
 
+  // MARK: - WebDAV
+
+  /// 库对应的 WebDAV 客户端（密码从 Keychain 取）
+  func webdavClient(forLibrary library: LibraryEntity) -> WebDAVClient? {
+    guard library.kind == "webdav", let baseURL = URL(string: String(library.key.dropFirst("webdav:".count))) else {
+      return nil
+    }
+    let password = Keychain.get(account: library.key)
+    return WebDAVClient(baseURL: baseURL, username: library.username, password: password)
+  }
+
+  /// 连接并挂载 WebDAV 目录为书库
+  func addWebDAVLibrary(baseURL: URL, username: String?, password: String?) async -> Result<LibraryEntity, Failure> {
+    let probe = WebDAVClient(baseURL: baseURL, username: username, password: password)
+    do {
+      try await probe.verify()
+    } catch {
+      return .failure(Failure(error.localizedDescription))
+    }
+
+    let context = container.mainContext
+    let key = "webdav:" + baseURL.absoluteString
+    if let password { Keychain.set(password, account: key) }
+
+    let descriptor = FetchDescriptor<LibraryEntity>(predicate: #Predicate { $0.key == key })
+    let library = (try? context.fetch(descriptor).first) ?? {
+      let name = baseURL.lastPathComponent.isEmpty ? (baseURL.host ?? "WebDAV") : baseURL.lastPathComponent
+      let lib = LibraryEntity(key: key, name: name, kind: "webdav")
+      context.insert(lib)
+      return lib
+    }()
+    library.username = username
+    try? context.save()
+
+    await rescan(library)
+    return .success(library)
+  }
+
+  // MARK: - 离线预取
+
+  /// 系列离线缓存进度（seriesKey → 0...1）
+  var prefetchProgress: [String: Double] = [:]
+  private var prefetchTasks: [String: Task<Void, Never>] = [:]
+
+  func togglePrefetch(_ series: SeriesEntity) {
+    if let running = prefetchTasks[series.key] {
+      running.cancel()
+      prefetchTasks[series.key] = nil
+      prefetchProgress[series.key] = nil
+      return
+    }
+    guard let library = series.library, library.kind == "webdav",
+          let client = webdavClient(forLibrary: library)
+    else { return }
+
+    let seriesKey = series.key
+    let chapters = Queries.orderedChapters(series).map { ch in
+      (url: URL(string: ch.path), kind: ch.kind)
+    }
+    let count = chapters.count
+    guard count > 0 else { return }
+
+    prefetchProgress[seriesKey] = 0
+    let task = Task { [weak self] in
+      var done = 0
+      var failed = 0
+      for chapter in chapters {
+        if Task.isCancelled { break }
+        guard let url = chapter.url else { failed += 1; continue }
+        do {
+          if chapter.kind == "folder" {
+            if let remote = await RemoteFolderPageSource(client: client, folderURL: url, seriesKey: seriesKey) {
+              await remote.prefetchAll()
+            }
+          } else {
+            _ = try await WebDAVCache.shared.ensureChapter(url: url, seriesKey: seriesKey, client: client)
+          }
+        } catch {
+          failed += 1
+        }
+        done += 1
+        self?.prefetchProgress[seriesKey] = Double(done) / Double(count)
+      }
+      if !Task.isCancelled && failed == 0 {
+        var pinned = WebDAVCache.shared.pinnedSeries
+        pinned.insert(seriesKey)
+        WebDAVCache.shared.pinnedSeries = pinned
+      }
+      self?.prefetchProgress[seriesKey] = nil
+      self?.prefetchTasks[seriesKey] = nil
+    }
+    prefetchTasks[series.key] = task
+  }
+
   // MARK: - 重扫
 
   func rescan(_ library: LibraryEntity) async {
     guard !isScanning else { return }
     isScanning = true
     defer { isScanning = false }
+
+    if library.kind == "webdav" {
+      guard let client = webdavClient(forLibrary: library),
+            let root = URL(string: String(library.key.dropFirst("webdav:".count)))
+      else {
+        lastErrors = ["WebDAV 配置无效：\(library.name)"]
+        return
+      }
+      let report = await WebDAVScanner.scanLibrary(client: client, root: root, libraryKey: library.key)
+      apply(report: report, to: library)
+      lastErrors = report.errors
+      await generateMissingCovers(for: library, root: nil, webdavClient: client)
+      return
+    }
 
     let root: URL?
     if library.kind == "folder" {
@@ -213,7 +321,7 @@ final class LibraryService {
     try? context.save()
   }
 
-  private func generateMissingCovers(for library: LibraryEntity, root: URL?) async {
+  private func generateMissingCovers(for library: LibraryEntity, root: URL?, webdavClient: WebDAVClient? = nil) async {
     struct CoverJob {
       let seriesKey: String
       let chapterPath: String
@@ -224,14 +332,21 @@ final class LibraryService {
       guard !CoverStore.shared.hasCover(seriesKey: series.key) else { continue }
       let first = Queries.orderedChapters(series).first
       guard let first else { continue }
+      // 云端 zip/PDF 封面要下载整包，超过 40MB 放弃（阅读时会自然缓存）
+      if let webdavClient, first.kind != "folder",
+         let url = URL(string: first.path),
+         let length = await webdavClient.contentLength(url), length > 40 * 1024 * 1024 {
+        continue
+      }
       jobs.append(CoverJob(seriesKey: series.key, chapterPath: first.path, kind: first.kind))
     }
     guard !jobs.isEmpty else { return }
-    let done = await Task.detached(priority: .utility) { [jobs, root] in
+    let done = await Task.detached(priority: .utility) { [jobs, root, webdavClient] in
       var count = 0
       for job in jobs {
         if await CoverStore.shared.generate(
-          seriesKey: job.seriesKey, chapterPath: job.chapterPath, kind: job.kind, libraryRoot: root
+          seriesKey: job.seriesKey, chapterPath: job.chapterPath, kind: job.kind,
+          libraryRoot: root, webdavClient: webdavClient
         ) {
           count += 1
         }
@@ -247,6 +362,10 @@ final class LibraryService {
     let context = container.mainContext
     if library.kind == "imports" {
       try? FileManager.default.removeItem(at: importsRoot)
+    }
+    if library.kind == "webdav" {
+      Keychain.remove(account: library.key)
+      WebDAVCache.shared.removeLibrary(prefix: library.key)
     }
     for series in library.series {
       CoverStore.shared.remove(seriesKey: series.key)

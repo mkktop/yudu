@@ -8,6 +8,7 @@ struct ImportSheet: View {
 
   @State private var showFilePicker = false
   @State private var showFolderPicker = false
+  @State private var showWebDAV = false
   @State private var importing = false
   @State private var resultMessage: String?
 
@@ -51,6 +52,22 @@ struct ImportSheet: View {
               }
             } icon: {
               Image(systemName: "folder.badge.plus")
+            }
+          }
+          .disabled(importing)
+
+          Button {
+            showWebDAV = true
+          } label: {
+            Label {
+              VStack(alignment: .leading, spacing: 3) {
+                Text("连接 WebDAV")
+                Text("坚果云 / NAS 等网盘目录，在线阅读 + 离线缓存")
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+            } icon: {
+              Image(systemName: "cloud")
             }
           }
           .disabled(importing)
@@ -108,6 +125,10 @@ struct ImportSheet: View {
       allowsMultipleSelection: false
     ) { result in
       handleFolderResult(result)
+    }
+    .sheet(isPresented: $showWebDAV) {
+      WebDAVSetupView()
+        .environment(libraryService)
     }
   }
 

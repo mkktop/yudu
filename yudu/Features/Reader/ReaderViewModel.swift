@@ -134,7 +134,13 @@ final class ReaderViewModel {
     pageCount = 0
 
     let root = libraryService.libraryRoot(for: series)
-    let opened = await PageSourceFactory.open(chapterPath: ref.path, kind: ref.kind, libraryRoot: root)
+    let webdavClient: WebDAVClient? = series.library?.kind == "webdav"
+      ? libraryService.webdavClient(forLibrary: series.library!)
+      : nil
+    let opened = await PageSourceFactory.open(
+      chapterPath: ref.path, kind: ref.kind, libraryRoot: root,
+      seriesKey: series.key, webdavClient: webdavClient
+    )
     guard !Task.isCancelled else { return }
     guard let opened else {
       fail("打不开这一话（文件可能被移动或权限失效）")

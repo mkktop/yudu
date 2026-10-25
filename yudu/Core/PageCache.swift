@@ -82,10 +82,19 @@ nonisolated final class CoverStore: @unchecked Sendable {
   }
 
   /// 从一章第一页生成封面；成功返回 true
-  func generate(seriesKey: String, chapterPath: String, kind: String, libraryRoot: URL?) async -> Bool {
+  func generate(
+    seriesKey: String,
+    chapterPath: String,
+    kind: String,
+    libraryRoot: URL?,
+    webdavClient: WebDAVClient? = nil
+  ) async -> Bool {
     let target = coverURL(seriesKey: seriesKey)
     let sourceID = "cover:" + hashKey(seriesKey)
-    guard let opened = await PageSourceFactory.open(chapterPath: chapterPath, kind: kind, libraryRoot: libraryRoot) else {
+    guard let opened = await PageSourceFactory.open(
+      chapterPath: chapterPath, kind: kind, libraryRoot: libraryRoot,
+      seriesKey: seriesKey, webdavClient: webdavClient
+    ) else {
       return false
     }
     let source = opened.source

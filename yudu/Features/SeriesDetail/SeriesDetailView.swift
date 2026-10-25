@@ -131,6 +131,10 @@ struct SeriesDetailView: View {
             .tint(.cinnabar)
 
           continueButton
+
+          if series.library?.kind == "webdav" {
+            offlineButton
+          }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
@@ -173,6 +177,34 @@ struct SeriesDetailView: View {
       }
       .buttonStyle(.borderedProminent)
     }
+  }
+
+  @ViewBuilder
+  private var offlineButton: some View {
+    let progress = libraryService.prefetchProgress[series.key]
+    let cached = WebDAVCache.shared.pinnedSeries.contains(series.key)
+    Button {
+      libraryService.togglePrefetch(series)
+    } label: {
+      HStack(spacing: 6) {
+        if progress != nil {
+          ProgressView(value: progress)
+            .frame(height: 12)
+          Text("正在缓存 \(Int(progress! * 100))% · 点按取消")
+            .font(.caption2)
+        } else if cached {
+          Image(systemName: "checkmark.icloud.fill")
+          Text("已离线")
+        } else {
+          Image(systemName: "icloud.and.arrow.down")
+          Text("离线缓存整部")
+        }
+      }
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 8)
+    }
+    .buttonStyle(.bordered)
+    .tint(.cinnabar)
   }
 
   private func chapterTitle(_ chapter: ChapterEntity) -> String {

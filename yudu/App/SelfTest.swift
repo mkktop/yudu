@@ -10,13 +10,18 @@ enum SelfTest {
     let args = ProcessInfo.processInfo.arguments
     guard let index = args.firstIndex(of: "-yuduSelfTest"), args.count > index + 1 else { return }
     let fixturePath = args[index + 1]
+    let webdavURL: URL? = {
+      guard let widx = args.firstIndex(of: "-yuduWebDAV"), args.count > widx + 1,
+            let url = URL(string: args[widx + 1]) else { return nil }
+      return url
+    }()
     Task {
-      await run(fixturePath: fixturePath, router: router, libraryService: libraryService)
+      await run(fixturePath: fixturePath, webdavURL: webdavURL, router: router, libraryService: libraryService)
     }
   }
 
   @MainActor
-  static func run(fixturePath: String, router: AppRouter, libraryService: LibraryService) async {
+  static func run(fixturePath: String, webdavURL: URL?, router: AppRouter, libraryService: LibraryService) async {
     let fixtureURL = URL(fileURLWithPath: fixturePath)
 
     // 1. 加入库并扫描
@@ -85,6 +90,45 @@ enum SelfTest {
       await shot("06b-pdf-reader")
       router.bookshelfPath.removeLast()
       try? await Task.sleep(for: .seconds(1.2))
+    }
+
+    // 6c. WebDAV 挂载与远程阅读
+    if let webdavURL {
+      let result = await libraryService.addWebDAVLibrary(baseURL: webdavURL, username: nil, password: nil)
+      var webdavMarker = "OK"
+      if case .failure(let failure) = result {
+        webdavMarker = "WEBDAV_FAIL:\(failure.message)"
+      }
+      // 诊断：挂载后的系列数与扫描错误
+      let wdCount = ((try? libraryService.modelContext.fetch(FetchDescriptor<LibraryEntity>())) ?? [])
+        .filter { $0.kind == "webdav" }
+        .map { "\($0.name):series=\($0.series.count)" }
+        .joined(separator: "; ")
+      let diagText2 = "libs=[\(wdCount)] errors=\(libraryService.lastErrors.joined(separator: " | "))"
+      try? diagText2.data(using: .utf8)?.write(to: diagDir.appendingPathComponent("webdav-diag.txt"))
+      try? await Task.sleep(for: .seconds(3.0))
+      await shot("09-webdav-shelf")
+
+      // 找 webdav 库里带 zip 章节的系列（夜行列车）；hasPrefix 不受 #Predicate 支持，取全量后过滤
+      let wdSeries = ((try? libraryService.modelContext.fetch(FetchDescriptor<SeriesEntity>())) ?? [])
+        .filter { $0.key.hasPrefix("webdav:") }
+      if let zipSeries = wdSeries.first(where: { s in
+        s.chapters.contains { $0.kind == "zip" }
+      }), let zipChapter = Queries.orderedChapters(zipSeries).first(where: { $0.kind == "zip" }) {
+        router.bookshelfPath.append(.series(zipSeries))
+        try? await Task.sleep(for: .seconds(1.2))
+        await shot("10-webdav-series")
+        router.bookshelfPath.append(.reader(series: zipSeries, startChapter: zipChapter))
+        try? await Task.sleep(for: .seconds(8.0)) // 留足整包下载时间
+        await shot("11-webdav-reader")
+        router.bookshelfPath.removeLast()
+        try? await Task.sleep(for: .seconds(1.0))
+        router.bookshelfPath.removeLast()
+        try? await Task.sleep(for: .seconds(1.0))
+      } else {
+        webdavMarker = "WEBDAV_NO_ZIP_SERIES"
+      }
+      writeDone(marker: webdavMarker == "OK" ? "OK" : webdavMarker)
     }
 
     // 7. 统计 & 设置

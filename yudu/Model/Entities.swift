@@ -1,15 +1,17 @@
 import Foundation
 import SwiftData
 
-/// 一个书库：授权的文件夹（原地扫描）或导入文件库（拷贝进沙盒）
+/// 一个书库：授权的文件夹（原地扫描）或导入文件库（拷贝进沙盒）或 WebDAV
 @Model
 final class LibraryEntity {
   @Attribute(.unique) var key: String
   var name: String
-  /// "folder"（授权文件夹）| "imports"（导入文件）
+  /// "folder"（授权文件夹）| "imports"（导入文件）| "webdav"（key 为 "webdav:<挂载地址>"）
   var kind: String
   /// folder 库的安全作用域书签
   var bookmark: Data?
+  /// webdav 库的登录名（密码在 Keychain）
+  var username: String?
   var createdAt: Date
 
   @Relationship(deleteRule: .cascade, inverse: \SeriesEntity.library)

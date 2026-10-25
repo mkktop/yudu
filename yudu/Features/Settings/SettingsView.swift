@@ -10,6 +10,8 @@ struct SettingsView: View {
   @State private var defaults = ReaderDefaults.load()
   @State private var eyeCare = EyeCare.load()
   @State private var showRemoveConfirm: LibraryEntity?
+  @State private var showCacheClear = false
+  @State private var cacheUsage = 0
 
   var body: some View {
     NavigationStack {
@@ -18,6 +20,7 @@ struct SettingsView: View {
         readerSection
         eyeCareSection
         librarySection
+        webdavCacheSection
         aboutSection
       }
       .navigationTitle("设置")
@@ -117,8 +120,8 @@ struct SettingsView: View {
             Text(library.name)
               .font(.subheadline)
             Label(
-              library.kind == "folder" ? "授权文件夹 · \(library.series.count) 部" : "导入文件 · \(library.series.count) 部",
-              systemImage: library.kind == "folder" ? "folder" : "doc.on.doc"
+              libraryKindLabel(library),
+              systemImage: library.kind == "folder" ? "folder" : (library.kind == "webdav" ? "cloud" : "doc.on.doc")
             )
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -166,6 +169,19 @@ struct SettingsView: View {
       Text("移除书库只删阅读进度与记录，授权文件夹和原文件不受影响；导入文件库会删除拷贝进来的副本。")
     }
     .confirmationDialog(
+      "清理 WebDAV 离线缓存？",
+      isPresented: $showCacheClear,
+      titleVisibility: .visible
+    ) {
+      Button("清理", role: .destructive) {
+        WebDAVCache.shared.clearAll()
+        cacheUsage += 1
+      }
+      Button("取消", role: .cancel) {}
+    } message: {
+      Text("已离线保护的漫画也会被清掉（云端文件不受影响），下次阅读会重新下载。")
+    }
+    .confirmationDialog(
       "移除「\(showRemoveConfirm?.name ?? "")」？",
       isPresented: Binding(
         get: { showRemoveConfirm != nil },
@@ -184,6 +200,42 @@ struct SettingsView: View {
       Text(showRemoveConfirm?.kind == "folder"
         ? "文件夹与漫画文件保留，仅清除本机的进度"
         : "将删除导入的文件副本与全部进度")
+    }
+  }
+
+  // MARK: - WebDAV 缓存
+
+  private var webdavCacheSection: some View {
+    Section {
+      let bytes = WebDAVCache.shared.usageBytes()
+      LabeledContent("已用缓存", value: ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+      Picker("容量上限", selection: Binding(
+        get: { WebDAVCache.shared.capBytes },
+        set: { WebDAVCache.shared.capBytes = $0; cacheUsage += 1 }
+      )) {
+        Text("1 GB").tag(Int64(1 << 30))
+        Text("2 GB").tag(Int64(2 << 30))
+        Text("4 GB").tag(Int64(4 << 30))
+        Text("8 GB").tag(Int64(8 << 30))
+      }
+      Button(role: .destructive) {
+        showCacheClear = true
+      } label: {
+        Label("清理全部缓存", systemImage: "trash")
+      }
+      .disabled(bytes == 0)
+    } header: {
+      Text("WebDAV 离线缓存")
+    } footer: {
+      Text("看过的章节自动缓存，断网也能翻；超过容量上限按最久未看清理（点过“离线缓存”的漫画受保护）。")
+    }
+  }
+
+  private func libraryKindLabel(_ library: LibraryEntity) -> String {
+    switch library.kind {
+    case "folder": "授权文件夹 · \(library.series.count) 部"
+    case "webdav": "WebDAV · \(library.series.count) 部"
+    default: "导入文件 · \(library.series.count) 部"
     }
   }
 

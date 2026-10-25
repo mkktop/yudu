@@ -237,8 +237,34 @@ enum PageSourceFactory {
     let access: LibraryAccess.AutoClose?
   }
 
-  /// 打开一章；rootURL 为 folder 库的授权根目录（nil 表示沙盒内无需作用域）
-  nonisolated static func open(chapterPath: String, kind: String, libraryRoot: URL?) async -> OpenedSource? {
+  /// 打开一章；rootURL 为 folder 库的授权根目录（nil 表示沙盒内无需作用域）。
+  /// WebDAV 章节（path 为 http(s) URL）需要传入客户端：zip/PDF 下载到缓存后本地读，散图逐张流式。
+  nonisolated static func open(
+    chapterPath: String,
+    kind: String,
+    libraryRoot: URL?,
+    seriesKey: String = "",
+    webdavClient: WebDAVClient? = nil
+  ) async -> OpenedSource? {
+    // WebDAV 远程章节
+    if chapterPath.hasPrefix("http") {
+      guard let client = webdavClient, let url = URL(string: chapterPath) else { return nil }
+      if kind == "folder" {
+        guard let remote = await RemoteFolderPageSource(client: client, folderURL: url, seriesKey: seriesKey) else {
+          return nil
+        }
+        return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
+      }
+      guard let local = try? await WebDAVCache.shared.ensureChapter(url: url, seriesKey: seriesKey, client: client) else {
+        return nil
+      }
+      let remoteSource: (any PageSource)? = kind == "pdf"
+        ? PdfPageSource(fileURL: local)
+        : try? ZipPageSource(fileURL: local)
+      guard let remoteSource else { return nil }
+      return OpenedSource(source: remoteSource, access: LibraryAccess.shared.begin(url: nil))
+    }
+
     let url = URL(fileURLWithPath: chapterPath)
     // 需要 scoped 访问的：章节路径就在授权目录下
     let needsScope = libraryRoot != nil && chapterPath.hasPrefix(libraryRoot!.path)
