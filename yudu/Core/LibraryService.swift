@@ -119,6 +119,44 @@ final class LibraryService {
     return WebDAVClient(baseURL: baseURL, username: library.username, password: password)
   }
 
+  // MARK: - 天翼云盘
+
+  private static let cloud189Shared = Cloud189Client()
+
+  /// 全局共享的天翼客户端（会话在 Keychain，登录由 Cloud189LoginView 完成）
+  var cloud189Client: Cloud189Client { Self.cloud189Shared }
+
+  func cloud189Client(forLibrary library: LibraryEntity) -> Cloud189Client? {
+    guard library.kind == "cloud189" else { return nil }
+    let client = Self.cloud189Shared
+    client.familyId = library.remoteFamilyId
+    return client
+  }
+
+  /// 挂载天翼云盘目录为书库（须已登录）
+  func addCloud189Library(folderId: String, familyId: String?, name: String) async -> Result<LibraryEntity, Failure> {
+    let client = Self.cloud189Shared
+    guard client.isLoggedIn else {
+      return .failure(Failure("天翼云盘未登录"))
+    }
+    let context = container.mainContext
+    let key = "cloud189:\(familyId.map { "f\($0)" } ?? "p")/\(folderId)"
+    let descriptor = FetchDescriptor<LibraryEntity>(predicate: #Predicate { $0.key == key })
+    let library = (try? context.fetch(descriptor).first) ?? {
+      let lib = LibraryEntity(key: key, name: name, kind: "cloud189")
+      context.insert(lib)
+      return lib
+    }()
+    library.name = name
+    library.remoteFolderId = folderId
+    library.remoteFamilyId = familyId
+    library.username = client.session?.loginName
+    try? context.save()
+
+    await rescan(library)
+    return .success(library)
+  }
+
   /// 连接并挂载 WebDAV 目录为书库
   func addWebDAVLibrary(baseURL: URL, username: String?, password: String?) async -> Result<LibraryEntity, Failure> {
     let probe = WebDAVClient(baseURL: baseURL, username: username, password: password)
@@ -159,16 +197,17 @@ final class LibraryService {
       prefetchProgress[series.key] = nil
       return
     }
-    guard let library = series.library, library.kind == "webdav",
-          let client = webdavClient(forLibrary: library)
-    else { return }
-
+    guard let library = series.library else { return }
     let seriesKey = series.key
-    let chapters = Queries.orderedChapters(series).map { ch in
-      (url: URL(string: ch.path), kind: ch.kind)
-    }
+    let entities = Queries.orderedChapters(series)
+    let chapters = entities.map { ch in (path: ch.path, kind: ch.kind, size: ch.fileSize) }
     let count = chapters.count
     guard count > 0 else { return }
+
+    // 各库的下载通道
+    let webdav: WebDAVClient? = library.kind == "webdav" ? webdavClient(forLibrary: library) : nil
+    let cloud189: Cloud189Client? = library.kind == "cloud189" ? cloud189Client(forLibrary: library) : nil
+    guard webdav != nil || cloud189 != nil else { return }
 
     prefetchProgress[seriesKey] = 0
     let task = Task { [weak self] in
@@ -176,14 +215,35 @@ final class LibraryService {
       var failed = 0
       for chapter in chapters {
         if Task.isCancelled { break }
-        guard let url = chapter.url else { failed += 1; continue }
         do {
-          if chapter.kind == "folder" {
-            if let remote = await RemoteFolderPageSource(client: client, folderURL: url, seriesKey: seriesKey) {
-              await remote.prefetchAll()
+          if chapter.path.hasPrefix("cloud189://") {
+            guard let client = cloud189, let parsed = Cloud189Path.parse(chapter.path) else {
+              failed += 1; continue
+            }
+            if chapter.kind == "folder" {
+              if let remote = await Cloud189FolderPageSource(
+                client: client, folderId: parsed.fileId, familyId: parsed.familyId, seriesKey: seriesKey
+              ) {
+                await remote.prefetchAll()
+              }
+            } else {
+              _ = try await WebDAVCache.shared.ensureChapter(
+                stableKey: chapter.path, ext: chapter.kind == "pdf" ? "pdf" : "zip", seriesKey: seriesKey,
+                downloader: { dest in
+                  try await client.download(fileId: parsed.fileId, familyId: parsed.familyId, to: dest)
+                }
+              )
+            }
+          } else if let url = URL(string: chapter.path), let client = webdav {
+            if chapter.kind == "folder" {
+              if let remote = await RemoteFolderPageSource(client: client, folderURL: url, seriesKey: seriesKey) {
+                await remote.prefetchAll()
+              }
+            } else {
+              _ = try await WebDAVCache.shared.ensureChapter(url: url, seriesKey: seriesKey, client: client)
             }
           } else {
-            _ = try await WebDAVCache.shared.ensureChapter(url: url, seriesKey: seriesKey, client: client)
+            failed += 1
           }
         } catch {
           failed += 1
@@ -208,6 +268,22 @@ final class LibraryService {
     guard !isScanning else { return }
     isScanning = true
     defer { isScanning = false }
+
+    if library.kind == "cloud189" {
+      guard let client = cloud189Client(forLibrary: library),
+            let folderId = library.remoteFolderId
+      else {
+        lastErrors = ["天翼云盘配置无效：\(library.name)"]
+        return
+      }
+      let report = await Cloud189Scanner.scanLibrary(
+        client: client, rootFolderId: folderId, familyId: library.remoteFamilyId, libraryKey: library.key
+      )
+      apply(report: report, to: library)
+      lastErrors = report.errors
+      await generateMissingCovers(for: library, root: nil, cloud189Client: client)
+      return
+    }
 
     if library.kind == "webdav" {
       guard let client = webdavClient(forLibrary: library),
@@ -321,7 +397,10 @@ final class LibraryService {
     try? context.save()
   }
 
-  private func generateMissingCovers(for library: LibraryEntity, root: URL?, webdavClient: WebDAVClient? = nil) async {
+  private func generateMissingCovers(
+    for library: LibraryEntity, root: URL?,
+    webdavClient: WebDAVClient? = nil, cloud189Client: Cloud189Client? = nil
+  ) async {
     struct CoverJob {
       let seriesKey: String
       let chapterPath: String
@@ -333,20 +412,24 @@ final class LibraryService {
       let first = Queries.orderedChapters(series).first
       guard let first else { continue }
       // 云端 zip/PDF 封面要下载整包，超过 40MB 放弃（阅读时会自然缓存）
-      if let webdavClient, first.kind != "folder",
-         let url = URL(string: first.path),
-         let length = await webdavClient.contentLength(url), length > 40 * 1024 * 1024 {
-        continue
+      if first.kind != "folder" {
+        if cloud189Client != nil {
+          if first.fileSize > 40 * 1024 * 1024 { continue }
+        } else if let webdavClient,
+                  let url = URL(string: first.path),
+                  let length = await webdavClient.contentLength(url), length > 40 * 1024 * 1024 {
+          continue
+        }
       }
       jobs.append(CoverJob(seriesKey: series.key, chapterPath: first.path, kind: first.kind))
     }
     guard !jobs.isEmpty else { return }
-    let done = await Task.detached(priority: .utility) { [jobs, root, webdavClient] in
+    let done = await Task.detached(priority: .utility) { [jobs, root, webdavClient, cloud189Client] in
       var count = 0
       for job in jobs {
         if await CoverStore.shared.generate(
           seriesKey: job.seriesKey, chapterPath: job.chapterPath, kind: job.kind,
-          libraryRoot: root, webdavClient: webdavClient
+          libraryRoot: root, webdavClient: webdavClient, cloud189Client: cloud189Client
         ) {
           count += 1
         }
@@ -365,6 +448,9 @@ final class LibraryService {
     }
     if library.kind == "webdav" {
       Keychain.remove(account: library.key)
+      WebDAVCache.shared.removeLibrary(prefix: library.key)
+    }
+    if library.kind == "cloud189" {
       WebDAVCache.shared.removeLibrary(prefix: library.key)
     }
     for series in library.series {

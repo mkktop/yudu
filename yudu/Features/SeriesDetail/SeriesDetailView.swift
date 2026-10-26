@@ -132,7 +132,7 @@ struct SeriesDetailView: View {
 
           continueButton
 
-          if series.library?.kind == "webdav" {
+          if series.library?.kind == "webdav" || series.library?.kind == "cloud189" {
             offlineButton
           }
         }

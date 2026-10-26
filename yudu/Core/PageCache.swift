@@ -87,13 +87,14 @@ nonisolated final class CoverStore: @unchecked Sendable {
     chapterPath: String,
     kind: String,
     libraryRoot: URL?,
-    webdavClient: WebDAVClient? = nil
+    webdavClient: WebDAVClient? = nil,
+    cloud189Client: Cloud189Client? = nil
   ) async -> Bool {
     let target = coverURL(seriesKey: seriesKey)
     let sourceID = "cover:" + hashKey(seriesKey)
     guard let opened = await PageSourceFactory.open(
       chapterPath: chapterPath, kind: kind, libraryRoot: libraryRoot,
-      seriesKey: seriesKey, webdavClient: webdavClient
+      seriesKey: seriesKey, webdavClient: webdavClient, cloud189Client: cloud189Client
     ) else {
       return false
     }

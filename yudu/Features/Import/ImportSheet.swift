@@ -9,6 +9,7 @@ struct ImportSheet: View {
   @State private var showFilePicker = false
   @State private var showFolderPicker = false
   @State private var showWebDAV = false
+  @State private var showCloud189 = false
   @State private var importing = false
   @State private var resultMessage: String?
 
@@ -71,6 +72,22 @@ struct ImportSheet: View {
             }
           }
           .disabled(importing)
+
+          Button {
+            showCloud189 = true
+          } label: {
+            Label {
+              VStack(alignment: .leading, spacing: 3) {
+                Text("天翼云盘")
+                Text("扫码登录，个人云 / 家庭云，在线阅读 + 离线缓存")
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+            } icon: {
+              Image(systemName: "icloud")
+            }
+          }
+          .disabled(importing)
         } footer: {
           Text("文件夹方式不占用额外空间，内容变动可在书架下拉重新扫描。")
         }
@@ -128,6 +145,10 @@ struct ImportSheet: View {
     }
     .sheet(isPresented: $showWebDAV) {
       WebDAVSetupView()
+        .environment(libraryService)
+    }
+    .sheet(isPresented: $showCloud189) {
+      Cloud189LoginView()
         .environment(libraryService)
     }
   }

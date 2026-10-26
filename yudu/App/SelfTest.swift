@@ -131,6 +131,18 @@ enum SelfTest {
       writeDone(marker: webdavMarker == "OK" ? "OK" : webdavMarker)
     }
 
+    // 6d. 天翼云盘协议连通性（真实服务器：取登录二维码，不扫码）
+    do {
+      let probe = Cloud189Client()
+      let qr = try await probe.beginQRLogin()
+      let image = Cloud189LoginView.makeQRCode(text: qr.uuid)
+      let qrDiag = "cloud189 qr: uuid=\(qr.uuid.prefix(24))… image=\(image != nil ? "\(Int(image!.size.width))px" : "nil")"
+      try? qrDiag.data(using: .utf8)?.write(to: diagDir.appendingPathComponent("cloud189-diag.txt"))
+    } catch {
+      try? ("cloud189 qr failed: \(error.localizedDescription)")
+        .data(using: .utf8)?.write(to: diagDir.appendingPathComponent("cloud189-diag.txt"))
+    }
+
     // 7. 统计 & 设置
     router.tab = .stats
     try? await Task.sleep(for: .seconds(1.0))

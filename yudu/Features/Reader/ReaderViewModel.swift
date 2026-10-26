@@ -137,9 +137,12 @@ final class ReaderViewModel {
     let webdavClient: WebDAVClient? = series.library?.kind == "webdav"
       ? libraryService.webdavClient(forLibrary: series.library!)
       : nil
+    let cloud189Client: Cloud189Client? = series.library?.kind == "cloud189" && series.library != nil
+      ? libraryService.cloud189Client(forLibrary: series.library!)
+      : nil
     let opened = await PageSourceFactory.open(
       chapterPath: ref.path, kind: ref.kind, libraryRoot: root,
-      seriesKey: series.key, webdavClient: webdavClient
+      seriesKey: series.key, webdavClient: webdavClient, cloud189Client: cloud189Client
     )
     guard !Task.isCancelled else { return }
     guard let opened else {

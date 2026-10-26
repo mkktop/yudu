@@ -239,13 +239,40 @@ enum PageSourceFactory {
 
   /// 打开一章；rootURL 为 folder 库的授权根目录（nil 表示沙盒内无需作用域）。
   /// WebDAV 章节（path 为 http(s) URL）需要传入客户端：zip/PDF 下载到缓存后本地读，散图逐张流式。
+  /// 天翼云盘章节（path 为 cloud189://）同样传入其客户端。
   nonisolated static func open(
     chapterPath: String,
     kind: String,
     libraryRoot: URL?,
     seriesKey: String = "",
-    webdavClient: WebDAVClient? = nil
+    webdavClient: WebDAVClient? = nil,
+    cloud189Client: Cloud189Client? = nil
   ) async -> OpenedSource? {
+    // 天翼云盘远程章节
+    if chapterPath.hasPrefix("cloud189://"),
+       let client = cloud189Client,
+       let parsed = Cloud189Path.parse(chapterPath) {
+      if kind == "folder" {
+        guard let remote = await Cloud189FolderPageSource(
+          client: client, folderId: parsed.fileId, familyId: parsed.familyId, seriesKey: seriesKey
+        ) else { return nil }
+        return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
+      }
+      guard let local = try? await WebDAVCache.shared.ensureChapter(
+        stableKey: chapterPath,
+        ext: kind == "pdf" ? "pdf" : "zip",
+        seriesKey: seriesKey,
+        downloader: { dest in
+          try await client.download(fileId: parsed.fileId, familyId: parsed.familyId, to: dest)
+        }
+      ) else { return nil }
+      let remoteSource: (any PageSource)? = kind == "pdf"
+        ? PdfPageSource(fileURL: local)
+        : try? ZipPageSource(fileURL: local)
+      guard let remoteSource else { return nil }
+      return OpenedSource(source: remoteSource, access: LibraryAccess.shared.begin(url: nil))
+    }
+
     // WebDAV 远程章节
     if chapterPath.hasPrefix("http") {
       guard let client = webdavClient, let url = URL(string: chapterPath) else { return nil }

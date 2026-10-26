@@ -10,8 +10,11 @@ final class LibraryEntity {
   var kind: String
   /// folder 库的安全作用域书签
   var bookmark: Data?
-  /// webdav 库的登录名（密码在 Keychain）
+  /// webdav 库的登录名（密码在 Keychain）；cloud189 库存登录昵称
   var username: String?
+  /// cloud189 库：挂载目录 id 与家庭云 id（nil = 个人云）
+  var remoteFolderId: String?
+  var remoteFamilyId: String?
   var createdAt: Date
 
   @Relationship(deleteRule: .cascade, inverse: \SeriesEntity.library)

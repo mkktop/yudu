@@ -235,6 +235,7 @@ struct SettingsView: View {
     switch library.kind {
     case "folder": "授权文件夹 · \(library.series.count) 部"
     case "webdav": "WebDAV · \(library.series.count) 部"
+    case "cloud189": "天翼云盘\(library.remoteFamilyId != nil ? "·家庭云" : "") · \(library.series.count) 部"
     default: "导入文件 · \(library.series.count) 部"
     }
   }

@@ -151,7 +151,11 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
   // MARK: 键与路径
 
   private func hashKey(_ url: URL) -> String {
-    let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
+    hashKeyString(url.absoluteString)
+  }
+
+  private func hashKeyString(_ text: String) -> String {
+    let digest = SHA256.hash(data: Data(text.utf8))
     return digest.prefix(12).map { String(format: "%02x", $0) }.joined()
   }
 
@@ -169,16 +173,32 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
 
   /// 缓存命中直接返回，否则下载
   func ensureChapter(url: URL, seriesKey: String, client: WebDAVClient) async throws -> URL {
-    let key = hashKey(url)
-    let target = dir.appendingPathComponent(key + "." + MediaSniff.extensionOf(url.lastPathComponent))
+    try await ensureChapter(
+      stableKey: url.absoluteString,
+      ext: MediaSniff.extensionOf(url.lastPathComponent),
+      seriesKey: seriesKey
+    ) { dest in
+      try await client.download(url, to: dest)
+    }
+  }
+
+  /// 通用章节缓存：稳定键 + 自定义下载器（天翼云盘用 fileId 做键，直链有时效不能做键）
+  func ensureChapter(
+    stableKey: String,
+    ext: String,
+    seriesKey: String,
+    downloader: @escaping @Sendable (URL) async throws -> Void
+  ) async throws -> URL {
+    let key = hashKeyString(stableKey)
+    let target = dir.appendingPathComponent(key + "." + ext)
     if FileManager.default.fileExists(atPath: target.path) {
       touch(key: key)
       return target
     }
-    try await client.download(url, to: target)
+    try await downloader(target)
     let size = (try? target.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
     lock.lock()
-    manifest[key] = Entry(url: url.absoluteString, seriesKey: seriesKey, size: size, at: .now)
+    manifest[key] = Entry(url: stableKey, seriesKey: seriesKey, size: size, at: .now)
     lock.unlock()
     persistManifest()
     evictIfNeeded()
