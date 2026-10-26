@@ -12,8 +12,10 @@ nonisolated final class PageCache: @unchecked Sendable {
   private var lock = NSLock()
 
   private init() {
-    // 超分大图单张解码后可达 30MB+，按总字节限额比按张数更稳
-    cache.totalCostLimit = 512 * 1024 * 1024
+    // 按设备物理内存定上限：6GB 以上给 1GB，老的给 512MB
+    // （NSCache 在系统内存吃紧时会自动清空，是安全的可牺牲缓存）
+    let physical = ProcessInfo.processInfo.physicalMemory
+    cache.totalCostLimit = physical >= 6 << 30 ? 1 << 30 : 512 * 1024 * 1024
     cache.countLimit = 80
   }
 
