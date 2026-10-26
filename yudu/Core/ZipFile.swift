@@ -196,6 +196,56 @@ nonisolated final class ZipFile: @unchecked Sendable {
   }
 
   /// 找 EOCD（含 zip64）
+  /// 供远程直读复用：定位中央目录（data 为文件尾部窗口）
+  nonisolated static func locateCentralDirectoryPublic(_ data: Data) throws -> (UInt64, UInt64, UInt64) {
+    try locateCentralDirectory(data)
+  }
+
+  /// 供远程直读复用：解析中央目录段（data 从目录起点开始），只返回条目
+  nonisolated static func parseCentralDirectorySlice(_ data: Data) -> [Entry]? {
+    func readU16(_ o: Int) -> UInt16 {
+      guard o + 2 <= data.count else { return 0 }
+      return UInt16(data[data.startIndex + o]) | (UInt16(data[data.startIndex + o + 1]) << 8)
+    }
+    func readU32(_ o: Int) -> UInt32 {
+      guard o + 4 <= data.count else { return 0 }
+      return UInt32(data[data.startIndex + o])
+        | (UInt32(data[data.startIndex + o + 1]) << 8)
+        | (UInt32(data[data.startIndex + o + 2]) << 16)
+        | (UInt32(data[data.startIndex + o + 3]) << 24)
+    }
+    var parsed: [Entry] = []
+    var cursor = 0
+    while cursor + 46 <= data.count {
+      guard readU32(cursor) == 0x02014B50 else { break }
+      let method = readU16(cursor + 10)
+      let compSize = readU32(cursor + 20)
+      let uncompSize = readU32(cursor + 24)
+      let nameLen = Int(readU16(cursor + 28))
+      let extraLen = Int(readU16(cursor + 30))
+      let commentLen = Int(readU16(cursor + 32))
+      let lhoRaw = readU32(cursor + 42)
+      guard cursor + 46 + nameLen + extraLen + commentLen <= data.count else { break }
+      let nameData = data.subdata(in: (cursor + 46)..<(cursor + 46 + nameLen))
+      let name = String(data: nameData, encoding: .utf8)
+        ?? String(data: nameData, encoding: .isoLatin1)
+        ?? ""
+      parsed.append(Entry(
+        name: name,
+        compressedSize: UInt64(compSize),
+        uncompressedSize: UInt64(uncompSize),
+        method: method,
+        localHeaderOffset: UInt64(lhoRaw)
+      ))
+      cursor += 46 + nameLen + extraLen + commentLen
+    }
+    return parsed.isEmpty ? nil : parsed
+  }
+
+  nonisolated static func isPageEntryName(_ name: String) -> Bool {
+    isPageEntry(name)
+  }
+
   private static func locateCentralDirectory(_ data: Data) throws -> (UInt64, UInt64, UInt64) {
     let maxScan = min(data.count, 65_536 + 22)
     guard data.count > 22, maxScan > 22 else { throw ZipError.notZip }

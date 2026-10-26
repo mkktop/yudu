@@ -270,6 +270,13 @@ enum PageSourceFactory {
         ) else { return nil }
         return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
       }
+      // 无盘模式：zip 优先 Range 按页直读（不下载整包）
+      if WebDAVCache.shared.diskless, kind == "zip" {
+        let fetcher = RangeFetcher(source: .cloud189(client, fileId: parsed.fileId, familyId: parsed.familyId))
+        if let remote = await RemoteZipPageSource(fetcher: fetcher) {
+          return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
+        }
+      }
       // 无盘模式：小包直接进内存
       if WebDAVCache.shared.diskless, parsed.fileId.isEmpty == false,
          let memory = await fetchToMemory(sizeLimit: 600 * 1024 * 1024, fetch: {
@@ -305,6 +312,12 @@ enum PageSourceFactory {
           return nil
         }
         return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
+      }
+      if WebDAVCache.shared.diskless, kind == "zip" {
+        let fetcher = RangeFetcher(source: .webdav(client, url))
+        if let remote = await RemoteZipPageSource(fetcher: fetcher) {
+          return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
+        }
       }
       if WebDAVCache.shared.diskless,
          let memory = await fetchToMemory(sizeLimit: 600 * 1024 * 1024, fetch: {
