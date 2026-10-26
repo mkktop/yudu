@@ -261,8 +261,8 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     let sourceBox = source
     let sid = sourceID
     loadTask = Task { [weak self] in
-      let image = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 2400) {
-        sourceBox.pageImage(at: index, maxPixel: 2400)
+      let image = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 4096) {
+        sourceBox.pageImage(at: index, maxPixel: 4096)
       }
       guard let self, let image, !Task.isCancelled else { return }
       self.imageView.image = image
