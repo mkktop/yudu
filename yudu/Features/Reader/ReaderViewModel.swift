@@ -253,7 +253,7 @@ final class ReaderViewModel {
 
   private func prefetch(around index: Int) {
     guard let source, pageCount > 0 else { return }
-    let maxPixel: Int = effectiveMode == .webtoon ? 1400 : 4096
+    let maxPixel: Int = effectiveMode == .webtoon ? 2048 : 4096
     let sourceBox = source
     let sid = sourceID
     let count = pageCount

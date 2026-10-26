@@ -118,8 +118,8 @@ private struct WebtoonPageItem: View {
     .task(id: "\(vm.sourceID)#\(index)") {
       guard vm.pageCount > 0, let source = vm.source else { return }
       let sid = vm.sourceID
-      image = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 1400) {
-        source.pageImage(at: index, maxPixel: 1400)
+      image = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 2048) {
+        source.pageImage(at: index, maxPixel: 2048)
       }
     }
     .background(
