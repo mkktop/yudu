@@ -156,7 +156,9 @@ nonisolated final class Cloud189FolderPageSource: PageSource, @unchecked Sendabl
     }
     let image = images[index]
     guard let data = try? client.fetchDataSync(fileId: image.id, familyId: familyId) else { return nil }
-    WebDAVCache.shared.storeImage(data, for: cacheKey, seriesKey: seriesKey)
+    if !WebDAVCache.shared.diskless {
+      WebDAVCache.shared.storeImage(data, for: cacheKey, seriesKey: seriesKey)
+    }
     return data
   }
 

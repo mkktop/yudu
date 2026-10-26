@@ -47,6 +47,15 @@ nonisolated final class ZipFile: @unchecked Sendable {
     self.entries = parsed.sorted { naturalCompare($0.name, $1.name) }
   }
 
+  /// 无盘模式：直接从内存数据读（不落盘）
+  init(data: Data) throws {
+    self.url = URL(fileURLWithPath: "/dev/null")
+    self.data = data
+    let parsed = try Self.parseCentralDirectory(data)
+    guard !parsed.isEmpty else { throw ZipError.corrupt("未找到图片条目") }
+    self.entries = parsed.sorted { naturalCompare($0.name, $1.name) }
+  }
+
   private static func parseCentralDirectory(_ data: Data) throws -> [Entry] {
     let (centralOffset, centralSize, entryCount) = try locateCentralDirectory(data)
 

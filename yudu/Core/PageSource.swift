@@ -115,6 +115,11 @@ nonisolated final class ZipPageSource: PageSource, @unchecked Sendable {
     self.zip = try ZipFile(url: fileURL)
   }
 
+  /// 无盘模式：从内存数据读整包
+  init(data: Data) throws {
+    self.zip = try ZipFile(data: data)
+  }
+
   var pageCount: Int { zip.pageCount }
 
   func pageImage(at index: Int, maxPixel: CGFloat) -> UIImage? {
@@ -135,6 +140,13 @@ nonisolated final class PdfPageSource: PageSource, @unchecked Sendable {
 
   init?(fileURL: URL) {
     guard let doc = CGPDFDocument(fileURL as CFURL), doc.numberOfPages > 0 else { return nil }
+    self.document = doc
+  }
+
+  /// 无盘模式：从内存数据读
+  init?(data: Data) {
+    guard let provider = CGDataProvider(data: data as CFData),
+          let doc = CGPDFDocument(provider), doc.numberOfPages > 0 else { return nil }
     self.document = doc
   }
 
@@ -258,6 +270,18 @@ enum PageSourceFactory {
         ) else { return nil }
         return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
       }
+      // 无盘模式：小包直接进内存
+      if WebDAVCache.shared.diskless, parsed.fileId.isEmpty == false,
+         let memory = await fetchToMemory(sizeLimit: 600 * 1024 * 1024, fetch: {
+           try await client.fetchData(fileId: parsed.fileId, familyId: parsed.familyId)
+         }) {
+        let memorySource: (any PageSource)? = kind == "pdf"
+          ? PdfPageSource(data: memory)
+          : try? ZipPageSource(data: memory)
+        if let memorySource {
+          return OpenedSource(source: memorySource, access: LibraryAccess.shared.begin(url: nil))
+        }
+      }
       guard let local = try? await WebDAVCache.shared.ensureChapter(
         stableKey: chapterPath,
         ext: kind == "pdf" ? "pdf" : "zip",
@@ -281,6 +305,17 @@ enum PageSourceFactory {
           return nil
         }
         return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
+      }
+      if WebDAVCache.shared.diskless,
+         let memory = await fetchToMemory(sizeLimit: 600 * 1024 * 1024, fetch: {
+           try await client.get(url)
+         }) {
+        let memorySource: (any PageSource)? = kind == "pdf"
+          ? PdfPageSource(data: memory)
+          : try? ZipPageSource(data: memory)
+        if let memorySource {
+          return OpenedSource(source: memorySource, access: LibraryAccess.shared.begin(url: nil))
+        }
       }
       guard let local = try? await WebDAVCache.shared.ensureChapter(url: url, seriesKey: seriesKey, client: client) else {
         return nil
@@ -316,5 +351,14 @@ enum PageSourceFactory {
       return nil
     }
     return OpenedSource(source: source, access: token)
+  }
+
+  /// 无盘模式取整包到内存；超过 sizeLimit（防内存爆）返回 nil 走回落路径
+  nonisolated private static func fetchToMemory(
+    sizeLimit: Int,
+    fetch: @escaping @Sendable () async throws -> Data
+  ) async -> Data? {
+    guard let data = try? await fetch(), data.count <= sizeLimit else { return nil }
+    return data
   }
 }

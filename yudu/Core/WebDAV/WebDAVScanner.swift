@@ -126,6 +126,9 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
     set { UserDefaults.standard.set(newValue, forKey: Self.capKey) }
   }
 
+  /// 无盘模式（容量设为 0）：阅读时不写硬盘，整包进内存直接读；手动“离线缓存”不受影响
+  var diskless: Bool { capBytes == 0 }
+
   /// 已离线预取完成的系列（同时受清理保护）
   var pinnedSeries: Set<String> {
     get { Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []) }
@@ -346,7 +349,9 @@ nonisolated final class RemoteFolderPageSource: PageSource, @unchecked Sendable 
       return data
     }
     guard let data = client.getSync(url) else { return nil }
-    WebDAVCache.shared.storeImage(data, for: url, seriesKey: seriesKey)
+    if !WebDAVCache.shared.diskless {
+      WebDAVCache.shared.storeImage(data, for: url, seriesKey: seriesKey)
+    }
     return data
   }
 

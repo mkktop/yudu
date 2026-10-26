@@ -213,6 +213,7 @@ struct SettingsView: View {
         get: { WebDAVCache.shared.capBytes },
         set: { WebDAVCache.shared.capBytes = $0; cacheUsage += 1 }
       )) {
+        Text("不缓存").tag(Int64(0))
         Text("1 GB").tag(Int64(1 << 30))
         Text("2 GB").tag(Int64(2 << 30))
         Text("4 GB").tag(Int64(4 << 30))
@@ -225,9 +226,11 @@ struct SettingsView: View {
       }
       .disabled(bytes == 0)
     } header: {
-      Text("WebDAV 离线缓存")
+      Text("云端离线缓存")
     } footer: {
-      Text("看过的章节自动缓存，断网也能翻；超过容量上限按最久未看清理（点过“离线缓存”的漫画受保护）。")
+      Text(WebDAVCache.shared.diskless
+        ? "无盘模式：阅读不写硬盘，整包在内存中直接读（超过 600MB 的大包会临时落盘）；手动点“离线缓存整部”仍会写盘。"
+        : "看过的章节自动缓存，断网也能翻；超过容量上限按最久未看清理（点过“离线缓存”的漫画受保护）。选“不缓存”可完全不写硬盘。")
     }
   }
 

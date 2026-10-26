@@ -12,7 +12,9 @@ nonisolated final class PageCache: @unchecked Sendable {
   private var lock = NSLock()
 
   private init() {
-    cache.countLimit = 40
+    // 超分大图单张解码后可达 30MB+，按总字节限额比按张数更稳
+    cache.totalCostLimit = 512 * 1024 * 1024
+    cache.countLimit = 80
   }
 
   private static func key(_ sourceID: String, _ index: Int, maxPixel: Int) -> NSString {
