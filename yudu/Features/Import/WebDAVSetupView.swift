@@ -32,13 +32,10 @@ struct WebDAVSetupView: View {
               VStack(spacing: 10) {
                 Image(systemName: "cloud.fill")
                   .font(.system(size: 26))
-                  .foregroundStyle(.white)
+                  .foregroundStyle(YuduTheme.violet)
                   .frame(width: 62, height: 62)
                   .background(
-                    LinearGradient(
-                      colors: [YuduTheme.violet, .hex(0x514777)],
-                      startPoint: .topLeading, endPoint: .bottomTrailing
-                    ),
+                    YuduTheme.violet.opacity(0.1),
                     in: RoundedRectangle(cornerRadius: 16)
                   )
                   .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(YuduTheme.violet.opacity(0.4), lineWidth: 1) }
@@ -87,7 +84,7 @@ struct WebDAVSetupView: View {
                 HStack(spacing: 8) {
                   if busy {
                     ProgressView()
-                      .tint(.white)
+                      .tint(YuduTheme.background)
                   }
                   Text("连接服务器")
                     .font(.subheadline.weight(.semibold))
@@ -95,8 +92,7 @@ struct WebDAVSetupView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 4)
               }
-              .buttonStyle(.borderedProminent)
-              .tint(YuduTheme.accent)
+              .buttonStyle(OrbitalButtonStyle())
               .disabled(busy || validatedAddress == nil)
               .listRowInsets(EdgeInsets())
               .listRowBackground(Color.clear)

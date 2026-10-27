@@ -132,7 +132,7 @@ struct SectionHeading: View {
             .tracking(2)
             .foregroundStyle(YuduTheme.accent)
         }
-        Text(title).font(.title3.weight(.semibold))
+        Text(title).font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
       }
       Spacer(minLength: 8)
       if !detail.isEmpty {
@@ -162,6 +162,7 @@ struct StatusPill: View {
 }
 
 struct OrbitalButtonStyle: ButtonStyle {
+  @Environment(\.isEnabled) private var isEnabled
   var prominent = true
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
@@ -169,7 +170,7 @@ struct OrbitalButtonStyle: ButtonStyle {
       .frame(maxWidth: .infinity, minHeight: 50)
       .foregroundStyle(prominent ? YuduTheme.background : YuduTheme.accent)
       .background(prominent ? YuduTheme.accent : YuduTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 15))
-      .opacity(configuration.isPressed ? 0.72 : 1)
+      .opacity(isEnabled ? (configuration.isPressed ? 0.72 : 1) : 0.4)
       .contentShape(RoundedRectangle(cornerRadius: 15))
   }
 }

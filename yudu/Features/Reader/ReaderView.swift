@@ -76,7 +76,7 @@ struct ReaderView: View {
           .multilineTextAlignment(.center)
         Button("重试") { vm.start() }
           .buttonStyle(.borderedProminent).tint(YuduTheme.accent)
-        Button("返回书架") { dismiss() }
+        Button("返回上一页") { dismiss() }
           .buttonStyle(.bordered)
           .tint(.white)
       }
@@ -196,6 +196,7 @@ struct ReaderView: View {
           Task { await vm.goToChapter(offset: -1, landing: -1) }
         } label: { Label("上一话", systemImage: "backward.end").font(.caption).frame(minHeight: 44) }
           .disabled(vm.prevChapter == nil || vm.isLoading)
+          .opacity(vm.prevChapter == nil || vm.isLoading ? 0.35 : 1)
         Spacer()
         Button { showJumpSheet = true } label: {
           HStack(spacing: 5) {
@@ -210,6 +211,7 @@ struct ReaderView: View {
           Task { await vm.goToChapter(offset: 1, landing: 0) }
         } label: { Label("下一话", systemImage: "forward.end").font(.caption).frame(minHeight: 44) }
           .disabled(vm.nextChapter == nil || vm.isLoading)
+          .opacity(vm.nextChapter == nil || vm.isLoading ? 0.35 : 1)
       }
       if vm.effectiveMode == .single, vm.pageCount > 1 {
         PageScrubber(vm: vm)
@@ -250,7 +252,7 @@ struct ReaderView: View {
         Image(systemName: icon).font(.system(size: 18, weight: .light))
         Text(label).font(.caption2).foregroundStyle(YuduTheme.muted)
       }.frame(minWidth: 52, minHeight: 48).contentShape(Rectangle())
-    }.buttonStyle(.plain)
+    }.buttonStyle(.plain).accessibilityLabel(label)
   }
 
   #if DEBUG

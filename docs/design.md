@@ -96,6 +96,7 @@ GitHub Actions 的 `iOS build and reading checks` 执行：
 1. 用真实 SwiftData 内存库运行 `tests/QueriesChecks.swift`，覆盖续读章节、部分进度、完成/未读切换、清空进度、历史统计和 WebDAV 地址。
 2. Xcode 编译 iOS Simulator App（无签名，构建时覆盖最低系统为 iOS 18，源项目的发行系统设置不变）。
 3. `tools/simulator-smoke.sh` 生成原创本地测试图，启动模拟器，走过扫描、详情、单页、恢复进度、条漫、续读书架、书库、导入、统计、设置与浅色书架，截图保存在 workflow artifact。
+4. 额外编译 Release，确保自测钩子不进入发行配置。
 
 模拟器 smoke test 仅使用本地散图文件夹，未用真实账号验证 WebDAV/NAS 与天翼云盘登录。保留这些功能的既有协议实现。签名、真机、云端认证与真实文件规模仍需在对应设备/账号上验收。
 

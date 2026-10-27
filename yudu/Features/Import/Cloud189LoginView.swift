@@ -32,63 +32,60 @@ struct Cloud189LoginView: View {
         switch phase {
         case .qr:
           ScrollView {
-          VStack(spacing: 22) {
-            VStack(spacing: 10) {
-              Image(systemName: "icloud.fill")
-                .font(.system(size: 26))
-                .foregroundStyle(.white)
-                .frame(width: 62, height: 62)
-                .background(
-                  LinearGradient(
-                    colors: [YuduTheme.violet, .hex(0x514777)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                  ),
-                  in: RoundedRectangle(cornerRadius: 16)
-                )
-                .shadow(color: YuduTheme.accent.opacity(0.4), radius: 8, y: 4)
-              Text("登录天翼云盘")
-                .font(.headline)
-              Text("用手机天翼云盘 App 扫一扫并确认")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Group {
-              if let qrImage {
-                Image(uiImage: qrImage)
-                  .interpolation(.none)
-                  .resizable()
-                  .scaledToFit()
-                  .padding(14)
-                  .background(.white, in: RoundedRectangle(cornerRadius: 16))
-                  .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
-              } else {
-                RoundedRectangle(cornerRadius: 16)
-                  .fill(YuduTheme.surface)
-                  .overlay(ProgressView())
+            VStack(spacing: 22) {
+              VStack(spacing: 10) {
+                Image(systemName: "icloud.fill")
+                  .font(.system(size: 26))
+                  .foregroundStyle(YuduTheme.violet)
+                  .frame(width: 62, height: 62)
+                  .background(
+                    YuduTheme.violet.opacity(0.1),
+                    in: RoundedRectangle(cornerRadius: 16)
+                  )
+                  .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(YuduTheme.violet.opacity(0.4), lineWidth: 1) }
+                Text("登录天翼云盘")
+                  .font(.headline)
+                Text("用手机天翼云盘 App 扫一扫并确认")
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
               }
+
+              Group {
+                if let qrImage {
+                  Image(uiImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(14)
+                    .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                    .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+                } else {
+                  RoundedRectangle(cornerRadius: 16)
+                    .fill(YuduTheme.surface)
+                    .overlay(ProgressView())
+                }
+              }
+              .frame(width: 236, height: 236)
+
+              Text(statusText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(YuduTheme.surface, in: Capsule())
+
+              Button {
+                startQRLogin()
+              } label: {
+                Label("刷新二维码", systemImage: "arrow.clockwise")
+              }
+              .buttonStyle(.bordered)
+
+              Text("登录凭证保存在本机钥匙串")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             }
-            .frame(width: 236, height: 236)
-
-            Text(statusText)
-              .font(.footnote)
-              .foregroundStyle(.secondary)
-              .padding(.horizontal, 14)
-              .padding(.vertical, 7)
-              .background(YuduTheme.surface, in: Capsule())
-
-            Button {
-              startQRLogin()
-            } label: {
-              Label("刷新二维码", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
-
-            Text("登录凭证保存在本机钥匙串")
-              .font(.caption2)
-              .foregroundStyle(.tertiary)
-          }
-          .frame(maxWidth: .infinity).padding(.vertical, 24).padding(.horizontal, 20)
+            .frame(maxWidth: .infinity).padding(.vertical, 24).padding(.horizontal, 20)
           }
         case .browse:
           List {

@@ -55,7 +55,7 @@ struct ImportSheet: View {
                        icon: outcome.success ? "checkmark.circle" : "exclamationmark.triangle",
                        color: outcome.success ? YuduTheme.success : YuduTheme.warning)
             if outcome.success {
-              Button("返回书架") { router.tab = .bookshelf; dismiss() }.buttonStyle(OrbitalButtonStyle())
+              Button("返回书架") { router.bookshelfPath = []; router.tab = .bookshelf; dismiss() }.buttonStyle(OrbitalButtonStyle())
             }
           }
           if !libraryService.lastErrors.isEmpty {

@@ -50,12 +50,20 @@ func page(title: String, index: Int, color: NSColor, destination: URL) throws {
   let representation = NSBitmapImageRep(data: image.tiffRepresentation!)!
   try representation.representation(using: .png, properties: [:])!.write(to: destination)
 }
+var rendered: [String: URL] = [:]
 for (series, title) in titles.enumerated() {
   for chapter in 1...(series == 0 ? 4 : 2) {
     let folder = root.appendingPathComponent(title).appendingPathComponent(String(format: "第1卷 第%02d话", chapter))
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     for index in 0..<8 {
-      try page(title: title, index: index, color: colors[series % colors.count], destination: folder.appendingPathComponent(String(format: "%03d.png", index + 1)))
+      let destination = folder.appendingPathComponent(String(format: "%03d.png", index + 1))
+      let cacheKey = index == 0 ? title : "page-\(index)"
+      if let existing = rendered[cacheKey] {
+        try FileManager.default.copyItem(at: existing, to: destination)
+      } else {
+        try page(title: index == 0 ? title : "原创测试页", index: index, color: colors[series % colors.count], destination: destination)
+        rendered[cacheKey] = destination
+      }
     }
   }
 }

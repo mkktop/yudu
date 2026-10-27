@@ -82,7 +82,7 @@ struct BookshelfView: View {
       .navigationTitle("书架")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .topBarLeading) { YuduWordmark() }
+        ToolbarItem(placement: .principal) { YuduWordmark().fixedSize() }
         ToolbarItem(placement: .topBarTrailing) {
           Button { router.showImport = true } label: {
             Image(systemName: "plus").font(.body.weight(.medium)).frame(width: 44, height: 44)

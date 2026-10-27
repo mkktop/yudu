@@ -37,7 +37,9 @@ struct RootView: View {
       guard !didLaunchRescan else { return }
       didLaunchRescan = true
       await libraryService.rescanOnLaunch()
+      #if DEBUG
       SelfTest.maybeRun(router: router, libraryService: libraryService)
+      #endif
     }
   }
 }

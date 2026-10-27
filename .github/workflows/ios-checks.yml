@@ -32,6 +32,14 @@ jobs:
             IPHONEOS_DEPLOYMENT_TARGET=18.0 SUPPORTED_PLATFORMS=iphonesimulator build
       - name: Run offline simulator smoke test
         run: bash tools/simulator-smoke.sh
+      - name: Build Release without debug self-test hooks
+        run: |
+          set -o pipefail
+          xcodebuild -project yudu.xcodeproj -scheme yudu \
+            -configuration Release -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 SUPPORTED_PLATFORMS=iphonesimulator build
       - uses: actions/upload-artifact@v4
         if: always()
         with:

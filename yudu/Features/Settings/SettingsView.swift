@@ -31,12 +31,20 @@ struct SettingsView: View {
               .font(.caption).foregroundStyle(YuduTheme.muted)
           }
           settingsGroup("阅读偏好", eyebrow: "READING PREFERENCES") {
-            Picker("默认阅读模式", selection: Binding(get: { defaults.mode }, set: { defaults.mode = $0; defaults.save() })) {
-              ForEach(ReaderMode.allCases) { Text($0.label).tag($0) }
+            HStack {
+              Text("默认阅读模式")
+              Spacer()
+              Picker("默认阅读模式", selection: Binding(get: { defaults.mode }, set: { defaults.mode = $0; defaults.save() })) {
+                ForEach(ReaderMode.allCases) { Text($0.label).tag($0) }
+              }.pickerStyle(.menu).labelsHidden()
             }
             Divider().overlay(YuduTheme.line)
-            Picker("画面适配", selection: Binding(get: { defaults.fit }, set: { defaults.fit = $0; defaults.save() })) {
-              ForEach(ReaderFit.allCases) { Text($0.label).tag($0) }
+            HStack {
+              Text("画面适配")
+              Spacer()
+              Picker("画面适配", selection: Binding(get: { defaults.fit }, set: { defaults.fit = $0; defaults.save() })) {
+                ForEach(ReaderFit.allCases) { Text($0.label).tag($0) }
+              }.pickerStyle(.menu).labelsHidden()
             }
             Divider().overlay(YuduTheme.line)
             Toggle("从右向左翻页", isOn: Binding(get: { defaults.rtl }, set: { defaults.rtl = $0; defaults.save() }))
@@ -71,12 +79,16 @@ struct SettingsView: View {
             if cacheLimit > 0 {
               ProgressView(value: Double(min(cacheBytes, cacheLimit)), total: Double(cacheLimit)).tint(YuduTheme.accent)
             }
-            Picker("缓存容量上限", selection: $cacheLimit) {
+            HStack {
+              Text("缓存容量上限")
+              Spacer()
+              Picker("缓存容量上限", selection: $cacheLimit) {
               Text("不自动缓存").tag(Int64(0))
               Text("1 GB").tag(Int64(1 << 30))
               Text("2 GB").tag(Int64(2 << 30))
               Text("4 GB").tag(Int64(4 << 30))
               Text("8 GB").tag(Int64(8 << 30))
+              }.pickerStyle(.menu).labelsHidden()
             }
             .onChange(of: cacheLimit) { _, value in
               WebDAVCache.shared.capBytes = value
