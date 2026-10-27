@@ -25,7 +25,7 @@ struct YuduApp: App {
         .modelContainer(container)
         .environment(router)
         .environment(libraryService)
-        .tint(.cinnabar)
+        .tint(YuduTheme.accent)
     }
   }
 }

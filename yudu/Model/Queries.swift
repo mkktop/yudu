@@ -127,7 +127,7 @@ enum Queries {
 
     if let inProgress = chapters
       .filter({ $0.progress != nil && $0.progress?.completed == false })
-      .min(by: { ($0.progress?.updatedAt ?? .distantPast) > ($1.progress?.updatedAt ?? .distantPast) }) {
+      .max(by: { ($0.progress?.updatedAt ?? .distantPast) < ($1.progress?.updatedAt ?? .distantPast) }) {
       return inProgress
     }
     if let firstUnfinished = chapters.first(where: { $0.progress?.completed != true }) {
@@ -175,12 +175,11 @@ enum Queries {
     } else {
       status = .unread
     }
-    var fraction = total == 0 ? 0 : Double(read) / Double(total)
-    if read == total, total > 0 {
-      fraction = 1
-    } else if fraction > 0.99 {
-      fraction = 0.99
+    let partialFraction = partial.reduce(0.0) { sum, chapter in
+      guard chapter.pageCount > 0, let progress = chapter.progress else { return sum }
+      return sum + min(Double(progress.page + 1) / Double(chapter.pageCount), 0.99)
     }
+    let fraction = total == 0 ? 0 : min((Double(read) + partialFraction) / Double(total), read == total ? 1 : 0.99)
     return SeriesInfo(series: series, total: total, read: read, status: status, fraction: fraction)
   }
 
@@ -195,31 +194,16 @@ enum Queries {
   }
 
   static func continueItems(_ seriesList: [SeriesEntity], limit: Int = 12) -> [ContinueItem] {
-    var items: [ContinueItem] = []
-    for series in seriesList {
-      let last = orderedChapters(series)
-        .compactMap { $0.progress }
-        .max(by: { $0.updatedAt < $1.updatedAt })
-      guard let last else { continue }
-      guard let chapter = last.chapter else { continue }
-      items.append(
-        ContinueItem(
-          id: series.persistentModelID,
-          series: series,
-          chapter: chapter,
-          page: chapter.progress?.page ?? 0,
-          pageCount: chapter.pageCount
-        )
+    let recent = seriesList
+      .filter { $0.lastReadAt != nil && info($0).status != .finished }
+      .sorted { ($0.lastReadAt ?? .distantPast) > ($1.lastReadAt ?? .distantPast) }
+    return Array(recent.compactMap { series -> ContinueItem? in
+      guard let chapter = continueTarget(series) else { return nil }
+      return ContinueItem(
+        id: series.persistentModelID, series: series, chapter: chapter,
+        page: resumePage(chapter), pageCount: chapter.pageCount
       )
-    }
-    return Array(
-      items
-        .sorted { a, b in
-          (a.chapter.progress?.updatedAt ?? .distantPast)
-            > (b.chapter.progress?.updatedAt ?? .distantPast)
-        }
-        .prefix(limit)
-    )
+    }.prefix(max(limit, 0)))
   }
 
   // MARK: 偏好
@@ -304,6 +288,7 @@ enum Queries {
       if chapter.pageCount > 0 { p.page = chapter.pageCount - 1 }
     } else if let p = chapter.progress {
       p.completed = false
+      p.page = 0
       p.updatedAt = .now
     }
     chapter.series?.lastReadAt = .now
@@ -336,35 +321,28 @@ enum Queries {
     var totalDays: Int
   }
 
-  static func stats(days: Int = 365, context: ModelContext) -> StatsSummary {
-    let since = Calendar.current.date(byAdding: .day, value: -days, to: .now) ?? .now
-    let descriptor = FetchDescriptor<ReadingLogEntity>(
-      predicate: #Predicate { $0.at > since }
-    )
-    let logs = (try? context.fetch(descriptor)) ?? []
-    var byDay: [String: Int] = [:]
-    var total = 0
-    for log in logs {
-      byDay[log.day, default: 0] += log.pages
-      total += log.pages
-    }
+  /// 累计指标使用完整流水；时间范围只影响统计页热力图。
+  static func stats(context: ModelContext) -> StatsSummary {
+    stats(logs: (try? context.fetch(FetchDescriptor<ReadingLogEntity>())) ?? [])
+  }
 
+  static func stats(logs: [ReadingLogEntity], now: Date = .now, calendar: Calendar = .current) -> StatsSummary {
+    var byDay: [String: Int] = [:]
+    let today = dayKey(now, locale: calendar)
+    for log in logs where log.pages > 0 && log.day <= today {
+      byDay[log.day, default: 0] += log.pages
+    }
     var streak = 0
-    var cursor = Calendar.current.startOfDay(for: .now)
-    // 今天没读不中断连续记录（从昨天往前数）
-    if byDay[Self.dayKey(cursor)] == nil {
-      cursor = Calendar.current.date(byAdding: .day, value: -1, to: cursor) ?? cursor
+    var cursor = calendar.startOfDay(for: now)
+    if byDay[dayKey(cursor, locale: calendar)] == nil {
+      cursor = calendar.date(byAdding: .day, value: -1, to: cursor) ?? cursor
     }
-    while byDay[Self.dayKey(cursor)] != nil {
+    while byDay[dayKey(cursor, locale: calendar)] != nil {
       streak += 1
-      cursor = Calendar.current.date(byAdding: .day, value: -1, to: cursor) ?? cursor
+      guard let previous = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+      cursor = previous
     }
-    return StatsSummary(
-      days: byDay,
-      streak: streak,
-      totalPages: total,
-      totalDays: byDay.count
-    )
+    return StatsSummary(days: byDay, streak: streak, totalPages: byDay.values.reduce(0, +), totalDays: byDay.count)
   }
 
   static func dayKey(_ date: Date, locale calendar: Calendar = .current) -> String {

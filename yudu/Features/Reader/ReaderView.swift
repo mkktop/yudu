@@ -15,6 +15,7 @@ struct ReaderView: View {
   @State private var eyeCare = EyeCare.load()
   @State private var showJumpSheet = false
   @State private var showTOC = false
+  @State private var showReaderSettings = false
 
   var body: some View {
     ZStack {
@@ -30,7 +31,9 @@ struct ReaderView: View {
       }
     }
     .toolbar(.hidden, for: .navigationBar)
-    .toolbarBackground(.hidden, for: .tabBar)
+    .toolbar(.hidden, for: .tabBar)
+    .preferredColorScheme(.dark)
+    .statusBarHidden(vm?.chromeVisible == false)
     .task(id: token) {
       vm?.stop()
       let model = ReaderViewModel(
@@ -46,6 +49,9 @@ struct ReaderView: View {
       if let vm {
         JumpSheet(vm: vm)
       }
+    }
+    .sheet(isPresented: $showReaderSettings) {
+      if let vm { ReaderSettingsSheet(vm: vm, eyeCare: $eyeCare) }
     }
     .sheet(isPresented: $showTOC) {
       if let vm {
@@ -68,7 +74,9 @@ struct ReaderView: View {
         Text(error)
           .foregroundStyle(.white.opacity(0.8))
           .multilineTextAlignment(.center)
-        Button("返回") { dismiss() }
+        Button("重试") { vm.start() }
+          .buttonStyle(.borderedProminent).tint(YuduTheme.accent)
+        Button("返回书架") { dismiss() }
           .buttonStyle(.bordered)
           .tint(.white)
       }
@@ -124,7 +132,7 @@ struct ReaderView: View {
 
   @ViewBuilder
   private func directionHint(_ vm: ReaderViewModel) -> some View {
-    if vm.showDirectionHint {
+    if vm.showDirectionHint && vm.effectiveMode == .single {
       HStack(spacing: 8) {
         Image(systemName: vm.prefs.rtl ? "arrow.left" : "arrow.right")
         Text(vm.prefs.rtl ? "从右往左 · 日漫" : "从左往右")
@@ -158,148 +166,91 @@ struct ReaderView: View {
 
   private func topBar(_ vm: ReaderViewModel) -> some View {
     HStack(spacing: 12) {
-      Button {
-        dismiss()
-      } label: {
-        Image(systemName: "chevron.down")
-          .font(.body.weight(.semibold))
-          .frame(width: 36, height: 36)
-          .background(.white.opacity(0.14), in: Circle())
-      }
-      .tint(.white)
-
-      VStack(alignment: .leading, spacing: 1) {
+      Button { dismiss() } label: {
+        Image(systemName: "chevron.left").font(.body.weight(.medium)).frame(width: 44, height: 44)
+          .background(YuduTheme.surface.opacity(0.94), in: Circle())
+      }.accessibilityLabel("退出阅读")
+      VStack(alignment: .leading, spacing: 5) {
         Text(vm.current?.seriesTitle ?? series.title)
-          .font(.footnote)
-          .foregroundStyle(.white.opacity(0.6))
-          .lineLimit(1)
-        Text(vm.current?.title ?? "")
-          .font(.subheadline.weight(.medium))
-          .foregroundStyle(.white)
-          .lineLimit(1)
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-
-      Button {
-        showTOC = true
-      } label: {
-        Image(systemName: "list.bullet")
-          .font(.body)
-          .frame(width: 36, height: 36)
-          .background(.white.opacity(0.14), in: Circle())
-      }
-      .tint(.white)
+          .font(.caption).foregroundStyle(YuduTheme.muted).lineLimit(1)
+        Text(vm.current?.title ?? "正在打开…")
+          .font(.subheadline.weight(.medium)).foregroundStyle(YuduTheme.text).lineLimit(1)
+      }.frame(maxWidth: .infinity, alignment: .leading)
+      Button { showReaderSettings = true } label: {
+        Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44)
+          .background(YuduTheme.surface.opacity(0.94), in: Circle())
+      }.accessibilityLabel("阅读设置与护眼")
     }
-    .padding(.horizontal, 12)
-    .padding(.top, 6)
-    .padding(.bottom, 10)
-    .background(
-      LinearGradient(colors: [.black.opacity(0.75), .black.opacity(0)], startPoint: .top, endPoint: .bottom)
-        .allowsHitTesting(false)
+    .foregroundStyle(YuduTheme.accent)
+    .padding(.horizontal, 16).padding(.vertical, 8)
+    .background {
+      LinearGradient(colors: [YuduTheme.background.opacity(0.98), YuduTheme.background.opacity(0.7)], startPoint: .top, endPoint: .bottom)
         .ignoresSafeArea(edges: .top)
-    )
+    }
   }
 
-  // MARK: - 底栏（玻璃控制条 + 页码滑条）
-
   private func bottomBar(_ vm: ReaderViewModel) -> some View {
-    VStack(spacing: 12) {
+    VStack(spacing: 14) {
+      HStack {
+        Button {
+          Task { await vm.goToChapter(offset: -1, landing: -1) }
+        } label: { Label("上一话", systemImage: "backward.end").font(.caption).frame(minHeight: 44) }
+          .disabled(vm.prevChapter == nil || vm.isLoading)
+        Spacer()
+        Button { showJumpSheet = true } label: {
+          HStack(spacing: 5) {
+            Text("\(vm.pageCount > 0 ? vm.page + 1 : 0) / \(vm.pageCount)").font(.caption.monospacedDigit())
+            Image(systemName: "chevron.down").font(.system(size: 8))
+          }.frame(minWidth: 75, minHeight: 44)
+        }
+        .disabled(vm.pageCount == 0 || vm.isLoading)
+        .accessibilityLabel("当前第 \(vm.page + 1) 页，共 \(vm.pageCount) 页，点按跳页")
+        Spacer()
+        Button {
+          Task { await vm.goToChapter(offset: 1, landing: 0) }
+        } label: { Label("下一话", systemImage: "forward.end").font(.caption).frame(minHeight: 44) }
+          .disabled(vm.nextChapter == nil || vm.isLoading)
+      }
       if vm.effectiveMode == .single, vm.pageCount > 1 {
         PageScrubber(vm: vm)
       } else if vm.pageCount > 0 {
-        ProgressView(value: Double(vm.page + 1) / Double(max(vm.pageCount, 1)))
-          .tint(.white.opacity(0.85))
-          .scaleEffect(x: 1, y: 0.6, anchor: .center)
-          .padding(.horizontal, 14)
-          .contentShape(Rectangle())
-          .onTapGesture { showJumpSheet = true }
+        ProgressView(value: Double(vm.page + 1) / Double(vm.pageCount)).tint(YuduTheme.accent)
       }
-
       HStack(spacing: 0) {
-        chapterButton("backward.end", enabled: vm.prevChapter != nil) {
-          Task { await vm.goToChapter(offset: -1, landing: -1) }
-        }
-
-        Spacer()
-
+        controlButton(icon: "list.bullet", label: "目录") { showTOC = true }
+        Spacer(minLength: 0)
         if vm.isPDF {
-          Text("PDF · 连续阅读")
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.white.opacity(0.8))
+          Text("PDF · 连续阅读").font(.caption).foregroundStyle(YuduTheme.muted)
         } else {
-          controlButton(
-            icon: vm.prefs.mode == .single ? "rectangle.portrait" : "rectangle.portrait.on.rectangle.portrait",
-            label: vm.prefs.mode == .single ? "单页" : "条漫"
-          ) {
+          controlButton(icon: vm.prefs.mode == .single ? "rectangle.portrait" : "rectangle.portrait.on.rectangle.portrait", label: vm.prefs.mode.label) {
             vm.setMode(vm.prefs.mode == .single ? .webtoon : .single)
           }
-        }
-
-        Spacer()
-
-        controlButton(
-          icon: vm.prefs.rtl ? "arrow.left.to.line" : "arrow.right.to.line",
-          label: vm.prefs.rtl ? "日漫" : "西漫"
-        ) {
-          vm.setRTL(!vm.prefs.rtl)
-        }
-
-        Spacer()
-
-        if !vm.isPDF {
-          controlButton(
-            icon: vm.prefs.fit == .width ? "arrow.left.and.right" : "arrow.up.and.down",
-            label: vm.prefs.fit.label
-          ) {
+          Spacer(minLength: 0)
+          controlButton(icon: vm.prefs.fit == .width ? "arrow.left.and.right" : "arrow.up.and.down", label: vm.prefs.fit.label) {
             vm.setFit(vm.prefs.fit == .width ? .height : .width)
           }
-          Spacer()
         }
-
-        chapterButton("forward.end", enabled: vm.nextChapter != nil) {
-          Task { await vm.goToChapter(offset: 1, landing: 0) }
-        }
+        Spacer(minLength: 0)
+        controlButton(icon: "sun.max", label: "护眼") { showReaderSettings = true }
       }
-      .padding(.horizontal, 16)
-      .padding(.vertical, 8)
-      .background(.ultraThinMaterial, in: Capsule())
+      .disabled(vm.isLoading)
     }
-    .padding(.horizontal, 14)
-    .padding(.top, 10)
-    .padding(.bottom, 8)
-    .background(
-      LinearGradient(colors: [.black.opacity(0), .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
-        .allowsHitTesting(false)
+    .foregroundStyle(YuduTheme.accent)
+    .padding(.horizontal, 20).padding(.bottom, 10).padding(.top, 2)
+    .background {
+      YuduTheme.surface.opacity(0.97)
+        .overlay(alignment: .top) { Rectangle().fill(YuduTheme.accent.opacity(0.25)).frame(height: 0.5) }
         .ignoresSafeArea(edges: .bottom)
-    )
-  }
-
-  private func chapterButton(_ icon: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-    Button(action: action) {
-      Image(systemName: icon)
-        .font(.body.weight(.semibold))
-        .frame(width: 42, height: 42)
-        .background(.white.opacity(enabled ? 0.14 : 0.05), in: Circle())
     }
-    .tint(.white)
-    .disabled(!enabled)
-    .opacity(enabled ? 1 : 0.35)
   }
 
   private func controlButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
     Button(action: action) {
-      VStack(spacing: 2) {
-        Image(systemName: icon)
-          .font(.body.weight(.medium))
-          .frame(height: 20)
-        Text(label)
-          .font(.system(size: 10, weight: .medium))
-          .foregroundStyle(.white.opacity(0.65))
-      }
-      .frame(width: 52, height: 42)
-      .contentShape(Rectangle())
-    }
-    .tint(.white)
+      VStack(spacing: 6) {
+        Image(systemName: icon).font(.system(size: 18, weight: .light))
+        Text(label).font(.caption2).foregroundStyle(YuduTheme.muted)
+      }.frame(minWidth: 52, minHeight: 48).contentShape(Rectangle())
+    }.buttonStyle(.plain)
   }
 
   #if DEBUG
@@ -343,7 +294,8 @@ struct ReaderView: View {
             vm.setPage(Int(localPage.rounded()))
           }
         }
-        .tint(.white.opacity(0.9))
+        .tint(YuduTheme.accent)
+        .accessibilityLabel("阅读页码")
         Text("\(vm.pageCount)")
           .font(.footnote.monospacedDigit())
           .foregroundStyle(.white.opacity(0.55))
@@ -361,6 +313,11 @@ struct ReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @FocusState private var focused: Bool
+    private var validPage: Int? {
+      guard let page = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+            (1...max(vm.pageCount, 1)).contains(page) else { return nil }
+      return page
+    }
 
     var body: some View {
       NavigationStack {
@@ -374,7 +331,8 @@ struct ReaderView: View {
             Text("当前第 \(vm.page + 1) 页")
           }
         }
-        .navigationTitle("跳页")
+        .yuduPage()
+        .navigationTitle("跳转到指定页")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
           ToolbarItem(placement: .cancellationAction) {
@@ -382,15 +340,15 @@ struct ReaderView: View {
           }
           ToolbarItem(placement: .confirmationAction) {
             Button("前往") {
-              if let n = Int(text.trimmingCharacters(in: .whitespaces)), n >= 1 {
-                vm.setPage(n - 1)
-              }
+              if let validPage { vm.setPage(validPage - 1) }
               dismiss()
             }
+            .disabled(validPage == nil)
           }
         }
       }
-      .presentationDetents([.height(180)])
+      .preferredColorScheme(.dark)
+      .presentationDetents([.height(260)])
     }
   }
 
@@ -418,7 +376,7 @@ struct ReaderView: View {
                   if chapter.id == vm.current?.id {
                     Text("正在读")
                       .font(.caption2)
-                      .foregroundStyle(.cinnabar)
+                      .foregroundStyle(YuduTheme.accent)
                   }
                 }
                 Spacer()
@@ -426,11 +384,12 @@ struct ReaderView: View {
               }
             }
             .listRowBackground(
-              chapter.id == vm.current?.id ? Color.cinnabar.opacity(0.1) : Color.clear
+              chapter.id == vm.current?.id ? YuduTheme.accent.opacity(0.1) : YuduTheme.surface
             )
           }
         }
-        .navigationTitle("目录")
+        .yuduPage()
+        .navigationTitle("章节目录")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
           ToolbarItem(placement: .confirmationAction) {
@@ -438,6 +397,8 @@ struct ReaderView: View {
           }
         }
       }
+      .preferredColorScheme(.dark)
+      .presentationDragIndicator(.visible)
     }
 
     @ViewBuilder

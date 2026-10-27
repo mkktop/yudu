@@ -31,6 +31,7 @@ struct Cloud189LoginView: View {
       Group {
         switch phase {
         case .qr:
+          ScrollView {
           VStack(spacing: 22) {
             VStack(spacing: 10) {
               Image(systemName: "icloud.fill")
@@ -39,12 +40,12 @@ struct Cloud189LoginView: View {
                 .frame(width: 62, height: 62)
                 .background(
                   LinearGradient(
-                    colors: [.cinnabar, .hex(0x8F2F1F)],
+                    colors: [YuduTheme.violet, .hex(0x514777)],
                     startPoint: .topLeading, endPoint: .bottomTrailing
                   ),
                   in: RoundedRectangle(cornerRadius: 16)
                 )
-                .shadow(color: Color.cinnabar.opacity(0.4), radius: 8, y: 4)
+                .shadow(color: YuduTheme.accent.opacity(0.4), radius: 8, y: 4)
               Text("登录天翼云盘")
                 .font(.headline)
               Text("用手机天翼云盘 App 扫一扫并确认")
@@ -63,7 +64,7 @@ struct Cloud189LoginView: View {
                   .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
               } else {
                 RoundedRectangle(cornerRadius: 16)
-                  .fill(Color(.secondarySystemGroupedBackground))
+                  .fill(YuduTheme.surface)
                   .overlay(ProgressView())
               }
             }
@@ -74,7 +75,7 @@ struct Cloud189LoginView: View {
               .foregroundStyle(.secondary)
               .padding(.horizontal, 14)
               .padding(.vertical, 7)
-              .background(Color(.secondarySystemGroupedBackground), in: Capsule())
+              .background(YuduTheme.surface, in: Capsule())
 
             Button {
               startQRLogin()
@@ -83,12 +84,12 @@ struct Cloud189LoginView: View {
             }
             .buttonStyle(.bordered)
 
-            Text("登录凭证只保存在本机钥匙串，卸载前不会丢失")
+            Text("登录凭证保存在本机钥匙串")
               .font(.caption2)
               .foregroundStyle(.tertiary)
           }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+          .frame(maxWidth: .infinity).padding(.vertical, 24).padding(.horizontal, 20)
+          }
         case .browse:
           List {
             scopePicker
@@ -102,6 +103,10 @@ struct Cloud189LoginView: View {
                   Label("上一级", systemImage: "arrow.up")
                 }
               }
+              if !busy && items.isEmpty {
+                Text("此目录为空，可返回上一级或切换云空间。")
+                  .font(.subheadline).foregroundStyle(YuduTheme.muted)
+              }
               ForEach(items.filter(\.isDirectory), id: \.id) { item in
                 Button {
                   path.append(item)
@@ -109,7 +114,7 @@ struct Cloud189LoginView: View {
                 } label: {
                   HStack(spacing: 10) {
                     Image(systemName: "folder.fill")
-                      .foregroundStyle(.cinnabar.opacity(0.8))
+                      .foregroundStyle(YuduTheme.accent)
                     Text(item.name)
                       .foregroundStyle(.primary)
                     Spacer()
@@ -126,9 +131,12 @@ struct Cloud189LoginView: View {
               }
             }
           }
+          .scrollContentBackground(.hidden)
+          .disabled(busy)
           .overlay { if busy { ProgressView() } }
         }
       }
+      .yuduPage()
       .navigationTitle(phase == .qr ? "天翼云盘" : (path.last?.name ?? "天翼云盘"))
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
@@ -136,16 +144,16 @@ struct Cloud189LoginView: View {
           Button("取消") {
             pollTask?.cancel()
             dismiss()
-          }
+          }.disabled(busy)
         }
         ToolbarItem(placement: .confirmationAction) {
           if phase == .browse {
-            Button("挂载此文件夹") { mount() }
+            Button("添加此文件夹") { mount() }
               .disabled(busy)
           }
         }
       }
-      .alert("挂载失败", isPresented: Binding(
+      .alert("无法读取或添加书库", isPresented: Binding(
         get: { message != nil },
         set: { if !$0 { message = nil } }
       )) {
@@ -162,6 +170,7 @@ struct Cloud189LoginView: View {
       }
     }
     .onDisappear { pollTask?.cancel() }
+    .interactiveDismissDisabled(busy)
   }
 
   // MARK: - 扫码
@@ -170,9 +179,10 @@ struct Cloud189LoginView: View {
     pollTask?.cancel()
     qrImage = nil
     statusText = "正在获取二维码…"
-    Task {
+    pollTask = Task {
       do {
         let login = try await client.beginQRLogin()
+        guard !Task.isCancelled else { return }
         qrLogin = login
         qrImage = Self.makeQRCode(text: login.uuid)
         statusText = "打开天翼云盘 App 扫码登录"
@@ -188,9 +198,11 @@ struct Cloud189LoginView: View {
     pollTask = Task {
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(2.5))
+        guard !Task.isCancelled else { return }
         guard let login = qrLogin else { return }
         do {
           if try await client.pollQRLogin(login) {
+            guard !Task.isCancelled else { return }
             await MainActor.run { statusText = "登录成功" }
             await enterBrowse()
             return
@@ -228,7 +240,9 @@ struct Cloud189LoginView: View {
   private func load(folderId: String) async {
     busy = true
     defer { busy = false }
-    items = (try? await client.listFiles(folderId: folderId, familyId: scopeFamilyId)) ?? []
+    items = []
+    do { items = try await client.listFiles(folderId: folderId, familyId: scopeFamilyId) }
+    catch { message = error.localizedDescription }
   }
 
   private var scopePicker: some View {

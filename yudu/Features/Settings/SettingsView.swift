@@ -1,304 +1,149 @@
 import SwiftUI
-import SwiftData
 
 struct SettingsView: View {
-  @Environment(\.modelContext) private var context
   @Environment(LibraryService.self) private var libraryService
-
-  @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
-
+  @Environment(AppRouter.self) private var router
+  @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.dark.rawValue
+  @AppStorage("dailyReadingGoal") private var dailyGoal = 30
   @State private var defaults = ReaderDefaults.load()
   @State private var eyeCare = EyeCare.load()
-  @State private var showRemoveConfirm: LibraryEntity?
   @State private var showCacheClear = false
-  @State private var cacheUsage = 0
+  @State private var cacheBytes: Int64 = 0
+  @State private var cacheLimit = WebDAVCache.shared.capBytes
 
   var body: some View {
     NavigationStack {
-      Form {
-        appearanceSection
-        readerSection
-        eyeCareSection
-        librarySection
-        webdavCacheSection
-        aboutSection
+      ScrollView {
+        VStack(alignment: .leading, spacing: 26) {
+          HStack(spacing: 16) {
+            OrbitalEmblem(size: 62)
+            VStack(alignment: .leading, spacing: 6) {
+              Text("雨读 YUDU").font(.title3.weight(.semibold))
+              Text("让阅读，进入你的轨道。")
+                .font(.caption).foregroundStyle(YuduTheme.muted)
+            }
+          }.frame(maxWidth: .infinity, alignment: .leading).padding(20).yuduPanel(accent: YuduTheme.accent)
+          settingsGroup("界面外观", eyebrow: "APPEARANCE") {
+            Picker("外观模式", selection: $appearanceRaw) {
+              ForEach(AppearanceMode.allCases) { Text($0.label).tag($0.rawValue) }
+            }.pickerStyle(.segmented)
+            Text("深空与晨光，两种阅读氛围。跟随系统可自动切换。")
+              .font(.caption).foregroundStyle(YuduTheme.muted)
+          }
+          settingsGroup("阅读偏好", eyebrow: "READING PREFERENCES") {
+            Picker("默认阅读模式", selection: Binding(get: { defaults.mode }, set: { defaults.mode = $0; defaults.save() })) {
+              ForEach(ReaderMode.allCases) { Text($0.label).tag($0) }
+            }
+            Divider().overlay(YuduTheme.line)
+            Picker("画面适配", selection: Binding(get: { defaults.fit }, set: { defaults.fit = $0; defaults.save() })) {
+              ForEach(ReaderFit.allCases) { Text($0.label).tag($0) }
+            }
+            Divider().overlay(YuduTheme.line)
+            Toggle("从右向左翻页", isOn: Binding(get: { defaults.rtl }, set: { defaults.rtl = $0; defaults.save() }))
+            Text("适用于日漫。每部漫画在阅读器中修改的偏好会单独记住。")
+              .font(.caption).foregroundStyle(YuduTheme.muted)
+          }
+          settingsGroup("护眼与亮度", eyebrow: "EYE COMFORT") {
+            comfortSlider(title: "阅读亮度", value: Binding(get: { eyeCare.brightness }, set: { eyeCare.brightness = $0; eyeCare.save() }), range: 0.4...1, percent: Int(eyeCare.brightness * 100), icon: "sun.max")
+            Divider().overlay(YuduTheme.line)
+            comfortSlider(title: "暖色滤镜", value: Binding(get: { eyeCare.warmth }, set: { eyeCare.warmth = $0; eyeCare.save() }), range: 0...0.6, percent: Int(eyeCare.warmth / 0.6 * 100), icon: "moon.stars")
+            Toggle("夜间自动启用暖色", isOn: Binding(get: { eyeCare.scheduleEnabled }, set: { eyeCare.scheduleEnabled = $0; eyeCare.save() }))
+            Text("20:00 – 次日 07:00 生效；护眼滤镜只影响漫画画面。")
+              .font(.caption).foregroundStyle(YuduTheme.muted)
+          }
+          settingsGroup("每日阅读目标", eyebrow: "DAILY GOAL") {
+            Stepper(value: $dailyGoal, in: 5...200, step: 5) {
+              HStack {
+                Text("每天")
+                Text("\(dailyGoal) 页").monospacedDigit().foregroundStyle(YuduTheme.accent)
+              }
+            }
+            Text("目标会显示在统计页，只记录真实阅读，不发送提醒。")
+              .font(.caption).foregroundStyle(YuduTheme.muted)
+          }
+          settingsGroup("离线缓存", eyebrow: "OFFLINE STORAGE") {
+            HStack {
+              Label("已用空间", systemImage: "internaldrive")
+              Spacer()
+              Text(ByteCountFormatter.string(fromByteCount: cacheBytes, countStyle: .file))
+                .font(.subheadline.monospacedDigit()).foregroundStyle(YuduTheme.accent)
+            }
+            if cacheLimit > 0 {
+              ProgressView(value: Double(min(cacheBytes, cacheLimit)), total: Double(cacheLimit)).tint(YuduTheme.accent)
+            }
+            Picker("缓存容量上限", selection: $cacheLimit) {
+              Text("不自动缓存").tag(Int64(0))
+              Text("1 GB").tag(Int64(1 << 30))
+              Text("2 GB").tag(Int64(2 << 30))
+              Text("4 GB").tag(Int64(4 << 30))
+              Text("8 GB").tag(Int64(8 << 30))
+            }
+            .onChange(of: cacheLimit) { _, value in
+              WebDAVCache.shared.capBytes = value
+              cacheBytes = WebDAVCache.shared.usageBytes()
+            }
+            Text(cacheLimit == 0
+              ? "不自动写入缓存。手动离线仍会保留文件；超过 600 MB 的大包可能临时写盘。"
+              : "超出上限时清理最久未看的章节。手动离线的漫画受保护，可能超出设定容量。")
+              .font(.caption).foregroundStyle(YuduTheme.muted)
+            Button(role: .destructive) { showCacheClear = true } label: {
+              Label("清理全部缓存", systemImage: "trash").frame(minHeight: 44)
+            }.disabled(cacheBytes == 0 || !libraryService.prefetchProgress.isEmpty)
+            if !libraryService.prefetchProgress.isEmpty {
+              Text("有漫画正在缓存，取消任务后可清理空间。")
+                .font(.caption).foregroundStyle(YuduTheme.warning)
+            }
+          }
+          Button { router.tab = .library } label: {
+            HStack {
+              Label("管理本地与云端书库", systemImage: "square.stack.3d.up")
+              Spacer()
+              Image(systemName: "arrow.up.right")
+            }.font(.subheadline).padding(20).yuduPanel()
+          }.buttonStyle(.plain).foregroundStyle(YuduTheme.accent)
+          VStack(spacing: 6) {
+            Text("YUDU · ORBITAL EDITION")
+              .font(.system(size: 10, design: .monospaced)).tracking(2)
+            Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
+              .font(.caption2)
+          }.foregroundStyle(YuduTheme.muted).frame(maxWidth: .infinity).padding(.bottom, 10)
+        }
+        .padding(20).frame(maxWidth: 760).frame(maxWidth: .infinity)
       }
+      .yuduPage()
       .navigationTitle("设置")
+      .navigationBarTitleDisplayMode(.inline)
+      .onAppear {
+        defaults = ReaderDefaults.load()
+        eyeCare = EyeCare.load()
+        cacheBytes = WebDAVCache.shared.usageBytes()
+      }
+      .confirmationDialog("清理全部离线缓存？", isPresented: $showCacheClear, titleVisibility: .visible) {
+        Button("清理缓存", role: .destructive) {
+          WebDAVCache.shared.clearAll()
+          cacheBytes = WebDAVCache.shared.usageBytes()
+        }
+        Button("取消", role: .cancel) {}
+      } message: { Text("包括手动离线的漫画。云端文件和阅读进度保留，下次阅读需要重新下载。") }
     }
   }
 
-  // MARK: - 外观
-
-  private var appearanceSection: some View {
-    Section {
-      Picker("模式", selection: $appearanceRaw) {
-        ForEach(AppearanceMode.allCases) { mode in
-          Text(mode.label).tag(mode.rawValue)
-        }
-      }
-      .pickerStyle(.segmented)
-    } header: {
-      Label("外观", systemImage: "circle.lefthalf.filled")
+  private func settingsGroup<Content: View>(_ title: String, eyebrow: String, @ViewBuilder content: () -> Content) -> some View {
+    VStack(alignment: .leading, spacing: 14) {
+      SectionHeading(title: title, eyebrow: eyebrow)
+      VStack(alignment: .leading, spacing: 16, content: content)
+        .font(.subheadline).padding(18).yuduPanel()
     }
   }
 
-  // MARK: - 阅读默认
-
-  private var readerSection: some View {
-    Section {
-      Picker("默认模式", selection: Binding(
-        get: { defaults.mode },
-        set: { defaults.mode = $0; defaults.save() }
-      )) {
-        ForEach(ReaderMode.allCases) { mode in
-          Text(mode.label).tag(mode)
-        }
+  private func comfortSlider(title: String, value: Binding<Double>, range: ClosedRange<Double>, percent: Int, icon: String) -> some View {
+    VStack(spacing: 9) {
+      HStack {
+        Label(title, systemImage: icon)
+        Spacer()
+        Text("\(percent)%").font(.caption.monospacedDigit()).foregroundStyle(YuduTheme.accent)
       }
-      Picker("默认适配", selection: Binding(
-        get: { defaults.fit },
-        set: { defaults.fit = $0; defaults.save() }
-      )) {
-        ForEach(ReaderFit.allCases) { fit in
-          Text(fit.label).tag(fit)
-        }
-      }
-      Toggle("默认从右往左（日漫）", isOn: Binding(
-        get: { defaults.rtl },
-        set: { defaults.rtl = $0; defaults.save() }
-      ))
-    } header: {
-      Label("阅读", systemImage: "book")
-    } footer: {
-      Text("只对没有单独调过设置的漫画生效；阅读器里改的会按书记住。")
-    }
-  }
-
-  // MARK: - 护眼
-
-  private var eyeCareSection: some View {
-    Section {
-      VStack(alignment: .leading, spacing: 6) {
-        Text("亮度 \(Int(eyeCare.brightness * 100))%")
-          .font(.footnote)
-          .foregroundStyle(.secondary)
-        Slider(value: Binding(
-          get: { eyeCare.brightness },
-          set: { eyeCare.brightness = $0; eyeCare.save() }
-        ), in: 0.4...1.0)
-      }
-      VStack(alignment: .leading, spacing: 6) {
-        Text("暖色 \(Int(eyeCare.warmth / 0.6 * 100))%")
-          .font(.footnote)
-          .foregroundStyle(.secondary)
-        Slider(value: Binding(
-          get: { eyeCare.warmth },
-          set: { eyeCare.warmth = $0; eyeCare.save() }
-        ), in: 0...0.6)
-      }
-      Toggle("夜间时段自动暖色（20:00 – 07:00）", isOn: Binding(
-        get: { eyeCare.scheduleEnabled },
-        set: { eyeCare.scheduleEnabled = $0; eyeCare.save() }
-      ))
-    } header: {
-      Label("护眼", systemImage: "eye")
-    } footer: {
-      Text("只作用于阅读画面，不影响其他页面。")
-    }
-  }
-
-  // MARK: - 书库
-
-  private var librarySection: some View {
-    Section {
-      let libraries = (try? context.fetch(FetchDescriptor<LibraryEntity>())) ?? []
-      if libraries.isEmpty {
-        Text("还没有书库，去书架右上角 + 导入")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-      }
-      ForEach(libraries, id: \.persistentModelID) { library in
-        HStack {
-          VStack(alignment: .leading, spacing: 3) {
-            Text(library.name)
-              .font(.subheadline)
-            Label(
-              libraryKindLabel(library),
-              systemImage: library.kind == "folder" ? "folder" : (library.kind == "webdav" ? "cloud" : "doc.on.doc")
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-          }
-          Spacer()
-          Button("重扫") {
-            Task { await libraryService.rescan(library) }
-          }
-          .font(.footnote)
-          .disabled(libraryService.isScanning)
-          Button("移除", role: .destructive) {
-            showRemoveConfirm = library
-          }
-          .font(.footnote)
-        }
-      }
-      Button {
-        Task { await libraryService.rescanAll() }
-      } label: {
-        Label("重新扫描全部", systemImage: "arrow.triangle.2.circlepath")
-      }
-      .disabled(libraryService.isScanning)
-
-      if libraryService.isScanning {
-        HStack(spacing: 8) {
-          ProgressView()
-          Text("扫描中…")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-        }
-      }
-
-      if !libraryService.lastErrors.isEmpty {
-        DisclosureGroup("扫描提示（\(libraryService.lastErrors.count)）") {
-          ForEach(libraryService.lastErrors.prefix(10), id: \.self) { error in
-            Text(error)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-        }
-      }
-    } header: {
-      Label("书库", systemImage: "books.vertical")
-    } footer: {
-      Text("移除书库只删阅读进度与记录，授权文件夹和原文件不受影响；导入文件库会删除拷贝进来的副本。")
-    }
-    .confirmationDialog(
-      "清理 WebDAV 离线缓存？",
-      isPresented: $showCacheClear,
-      titleVisibility: .visible
-    ) {
-      Button("清理", role: .destructive) {
-        WebDAVCache.shared.clearAll()
-        cacheUsage += 1
-      }
-      Button("取消", role: .cancel) {}
-    } message: {
-      Text("已离线保护的漫画也会被清掉（云端文件不受影响），下次阅读会重新下载。")
-    }
-    .confirmationDialog(
-      "移除「\(showRemoveConfirm?.name ?? "")」？",
-      isPresented: Binding(
-        get: { showRemoveConfirm != nil },
-        set: { if !$0 { showRemoveConfirm = nil } }
-      ),
-      titleVisibility: .visible
-    ) {
-      Button("移除", role: .destructive) {
-        if let library = showRemoveConfirm {
-          libraryService.removeLibrary(library)
-        }
-        showRemoveConfirm = nil
-      }
-      Button("取消", role: .cancel) { showRemoveConfirm = nil }
-    } message: {
-      Text(showRemoveConfirm?.kind == "folder"
-        ? "文件夹与漫画文件保留，仅清除本机的进度"
-        : "将删除导入的文件副本与全部进度")
-    }
-  }
-
-  // MARK: - WebDAV 缓存
-
-  private var webdavCacheSection: some View {
-    Section {
-      let bytes = WebDAVCache.shared.usageBytes()
-      let cap = WebDAVCache.shared.capBytes
-      LabeledContent("已用缓存", value: ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
-      if cap > 0 {
-        VStack(alignment: .leading, spacing: 5) {
-          ProgressView(
-            value: Double(min(bytes, cap)),
-            total: Double(cap)
-          )
-          .tint(.cinnabar)
-          Text("上限 \(ByteCountFormatter.string(fromByteCount: cap, countStyle: .file))，超出后按最久未看清理")
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-        }
-      }
-      Picker("容量上限", selection: Binding(
-        get: { WebDAVCache.shared.capBytes },
-        set: { WebDAVCache.shared.capBytes = $0; cacheUsage += 1 }
-      )) {
-        Text("不缓存").tag(Int64(0))
-        Text("1 GB").tag(Int64(1 << 30))
-        Text("2 GB").tag(Int64(2 << 30))
-        Text("4 GB").tag(Int64(4 << 30))
-        Text("8 GB").tag(Int64(8 << 30))
-      }
-      Button(role: .destructive) {
-        showCacheClear = true
-      } label: {
-        Label("清理全部缓存", systemImage: "trash")
-      }
-      .disabled(bytes == 0)
-    } header: {
-      Label("云端离线缓存", systemImage: "icloud.and.arrow.down")
-    } footer: {
-      Text(WebDAVCache.shared.diskless
-        ? "无盘模式：阅读不写硬盘，整包在内存中直接读（超过 600MB 的大包会临时落盘）；手动点“离线缓存整部”仍会写盘。"
-        : "看过的章节自动缓存，断网也能翻；超过容量上限按最久未看清理（点过“离线缓存”的漫画受保护）。选“不缓存”可完全不写硬盘。")
-    }
-  }
-
-  private func libraryKindLabel(_ library: LibraryEntity) -> String {
-    switch library.kind {
-    case "folder": "授权文件夹 · \(library.series.count) 部"
-    case "webdav": "WebDAV · \(library.series.count) 部"
-    case "cloud189": "天翼云盘\(library.remoteFamilyId != nil ? "·家庭云" : "") · \(library.series.count) 部"
-    default: "导入文件 · \(library.series.count) 部"
-    }
-  }
-
-  // MARK: - 关于
-
-  private var aboutSection: some View {
-    Section {
-      HStack(spacing: 12) {
-        AppBadge()
-          .frame(width: 44, height: 44)
-        VStack(alignment: .leading, spacing: 2) {
-          Text("雨读 Yudu")
-            .font(.subheadline.weight(.semibold))
-          Text("iOS \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-      }
-      .padding(.vertical, 2)
-      LabeledContent("桌面版", value: "雨读 Yudu")
-    } header: {
-      Label("关于", systemImage: "info.circle")
-    }
-  }
-}
-
-// MARK: - App 徽标（设置页关于区用，画一枚与 App 图标同款的小图标）
-
-private struct AppBadge: View {
-  var body: some View {
-    ZStack {
-      RoundedRectangle(cornerRadius: 10)
-        .fill(LinearGradient(
-          colors: [Color(hex: 0xC9543D), Color(hex: 0x6B1F12)],
-          startPoint: .top, endPoint: .bottom
-        ))
-      VStack(spacing: 3) {
-        Image(systemName: "drop.fill")
-          .font(.system(size: 12))
-          .foregroundStyle(Color(hex: 0xF7EEE1))
-        Image(systemName: "book.fill")
-          .font(.system(size: 11))
-          .foregroundStyle(Color(hex: 0xF7EEE1))
-      }
+      Slider(value: value, in: range).accessibilityLabel(title)
     }
   }
 }
