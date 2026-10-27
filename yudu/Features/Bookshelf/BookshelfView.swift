@@ -43,13 +43,13 @@ struct BookshelfView: View {
         if allSeries.isEmpty {
           emptyState
         } else {
-          VStack(alignment: .leading, spacing: 18) {
+          VStack(alignment: .leading, spacing: 20) {
             continueSection
             filterChips
             coverGrid
           }
           .padding(.horizontal, 16)
-          .padding(.bottom, 24)
+          .padding(.bottom, 28)
         }
       }
       .background(Color(.systemGroupedBackground))
@@ -90,6 +90,14 @@ struct BookshelfView: View {
       .refreshable {
         await libraryService.rescanAll()
       }
+      .task {
+        #if DEBUG
+        // 自测辅助：-yuduShowImport 直接弹出导入面板供截图
+        if ProcessInfo.processInfo.arguments.contains("-yuduShowImport") {
+          showImport = true
+        }
+        #endif
+      }
       }
     }
 
@@ -113,7 +121,10 @@ struct BookshelfView: View {
               .buttonStyle(.plain)
             }
           }
+          .padding(.vertical, 4)
+          .padding(.horizontal, 2)
         }
+        .padding(.horizontal, -2)
       }
     }
   }
@@ -147,37 +158,75 @@ struct BookshelfView: View {
   // MARK: - 封面墙
 
   private var coverGrid: some View {
-    let columns = [GridItem(.adaptive(minimum: 104, maximum: 140), spacing: 14)]
-    return LazyVGrid(columns: columns, spacing: 18) {
-      ForEach(filtered, id: \.series.persistentModelID) { info in
-        NavigationLink(value: BookshelfRoute.series(info.series)) {
-          CoverCard(info: info)
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .firstTextBaseline) {
+        Text("全部漫画")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.secondary)
+        Text("\(filtered.count)")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.tertiary)
+        Spacer()
+      }
+      let columns = [GridItem(.adaptive(minimum: 104, maximum: 140), spacing: 14)]
+      LazyVGrid(columns: columns, spacing: 18) {
+        ForEach(filtered, id: \.series.persistentModelID) { info in
+          NavigationLink(value: BookshelfRoute.series(info.series)) {
+            CoverCard(info: info)
+          }
+          .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
       }
     }
   }
 
   private var emptyState: some View {
-    VStack(spacing: 14) {
-      Image(systemName: "books.vertical")
-        .font(.system(size: 44))
-        .foregroundStyle(.tertiary)
+    VStack(spacing: 18) {
+      EmptyShelfIllustration()
+        .padding(.bottom, 6)
       Text("书架还是空的")
-        .font(.headline)
-      Text("导入 zip / cbz / PDF 文件，或授权一个漫画文件夹")
+        .font(.title3.weight(.semibold))
+      Text("导入 zip / cbz / PDF 文件，或授权一个漫画文件夹\n也可以连接 WebDAV、天翼云盘在线阅读")
         .font(.subheadline)
         .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .lineSpacing(3)
       Button {
         showImport = true
       } label: {
         Label("导入漫画", systemImage: "plus")
-          .padding(.horizontal, 18)
-          .padding(.vertical, 10)
+          .padding(.horizontal, 22)
+          .padding(.vertical, 12)
       }
       .buttonStyle(.borderedProminent)
+      .tint(.cinnabar)
+      .padding(.top, 4)
     }
-    .frame(maxWidth: .infinity, minHeight: 480)
+    .frame(maxWidth: .infinity, minHeight: 520)
+  }
+}
+
+// MARK: - 空书架插画（三册斜排的书）
+
+private struct EmptyShelfIllustration: View {
+  var body: some View {
+    ZStack {
+      cover("雪", key: "empty-a")
+        .rotationEffect(.degrees(-9))
+        .offset(x: -62, y: 6)
+      cover("海", key: "empty-b")
+        .rotationEffect(.degrees(8))
+        .offset(x: 60, y: 10)
+      cover("雨", key: "empty-c")
+        .shadow(color: .black.opacity(0.22), radius: 10, y: 6)
+    }
+    .frame(height: 168)
+  }
+
+  private func cover(_ title: String, key: String) -> some View {
+    PlaceholderCoverView(title: title, key: key)
+      .frame(width: 82, height: 110)
+      .clipShape(RoundedRectangle(cornerRadius: 8))
   }
 }
 
@@ -187,10 +236,10 @@ struct CoverCard: View {
   let info: Queries.SeriesInfo
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      CoverImage(seriesKey: info.series.key)
+    VStack(alignment: .leading, spacing: 7) {
+      CoverImage(seriesKey: info.series.key, title: info.series.title)
         .aspectRatio(3 / 4, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(alignment: .topLeading) {
           statusBadge
         }
@@ -198,7 +247,7 @@ struct CoverCard: View {
           if info.status == .reading, info.fraction > 0.005 {
             GeometryReader { geo in
               ZStack(alignment: .leading) {
-                Rectangle().fill(.ultraThinMaterial.opacity(0.5))
+                Rectangle().fill(.black.opacity(0.35))
                 Rectangle()
                   .fill(Color.cinnabar)
                   .frame(width: geo.size.width * info.fraction)
@@ -207,6 +256,7 @@ struct CoverCard: View {
             .frame(height: 3)
           }
         }
+        .shadow(color: .black.opacity(0.18), radius: 7, y: 4)
       Text(info.series.title)
         .font(.footnote)
         .lineLimit(2)
@@ -219,12 +269,12 @@ struct CoverCard: View {
   private var statusBadge: some View {
     switch info.status {
     case .finished:
-      Text("已读完")
-        .font(.caption2.weight(.semibold))
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(.green.opacity(0.85), in: Capsule())
+      Image(systemName: "checkmark")
+        .font(.caption2.weight(.bold))
+        .padding(5)
+        .background(.green.opacity(0.9), in: Circle())
         .foregroundStyle(.white)
+        .padding(6)
     case .reading:
       EmptyView()
     case .unread:
@@ -233,62 +283,52 @@ struct CoverCard: View {
   }
 }
 
-// MARK: - 继续阅读卡
+// MARK: - 继续阅读卡（宽卡）
 
 struct ContinueCard: View {
   let item: Queries.ContinueItem
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      CoverImage(seriesKey: item.series.key)
-        .frame(width: 92, height: 122)
+    HStack(spacing: 12) {
+      CoverImage(seriesKey: item.series.key, title: item.series.title)
+        .frame(width: 62, height: 84)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-      Text(item.series.title)
-        .font(.footnote.weight(.medium))
-        .lineLimit(1)
-      Text(item.chapter.title)
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-      if item.pageCount > 0 {
-        Text("第 \(min(item.page + 1, item.pageCount)) / \(item.pageCount) 页")
-          .font(.caption2.monospacedDigit())
-          .foregroundStyle(.cinnabar)
-      }
-    }
-    .frame(width: 92)
-  }
-}
+        .shadow(color: .black.opacity(0.16), radius: 4, y: 2)
 
-// MARK: - 封面图（磁盘缓存 + 生成中重试）
-
-struct CoverImage: View {
-  let seriesKey: String
-  @Environment(LibraryService.self) private var libraryService
-  @State private var image: UIImage?
-
-  var body: some View {
-    ZStack {
-      Rectangle().fill(Color(.tertiarySystemFill))
-      if let image {
-        Image(uiImage: image)
-          .resizable()
-          .scaledToFill()
-      } else {
-        Image(systemName: "book.closed")
-          .font(.title3)
-          .foregroundStyle(.tertiary)
-      }
-    }
-    .task(id: "\(seriesKey)#\(libraryService.coverVersion)") {
-      // 封面可能在扫描后几秒内生成，带重试
-      for _ in 0..<24 {
-        if let loaded = UIImage(contentsOfFile: CoverStore.shared.coverURL(seriesKey: seriesKey).path) {
-          image = loaded
-          return
+      VStack(alignment: .leading, spacing: 4) {
+        Text(item.series.title)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.primary)
+          .lineLimit(1)
+        Text(item.chapter.title)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+        Spacer(minLength: 0)
+        HStack(spacing: 6) {
+          if item.pageCount > 0 {
+            ProgressView(value: Double(item.page + 1) / Double(max(item.pageCount, 1)))
+              .tint(.cinnabar)
+            Text("\(min(item.page + 1, item.pageCount))/\(item.pageCount)")
+              .font(.caption2.monospacedDigit())
+              .foregroundStyle(.secondary)
+          } else {
+            Text("开始阅读")
+              .font(.caption2)
+              .foregroundStyle(.cinnabar)
+          }
         }
-        try? await Task.sleep(for: .milliseconds(500))
       }
+      .frame(maxWidth: .infinity, alignment: .leading)
+
+      Image(systemName: "play.circle.fill")
+        .font(.title2)
+        .foregroundStyle(.cinnabar)
+        .symbolRenderingMode(.hierarchical)
     }
+    .padding(12)
+    .frame(width: 272, height: 108)
+    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
   }
 }

@@ -44,19 +44,79 @@ struct WebDAVSetupView: View {
         case .form:
           Form {
             Section {
-              TextField("服务器地址", text: $address)
-                .keyboardType(.URL)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-              TextField("用户名（可选）", text: $username)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-              SecureField("密码 / 应用密码（可选）", text: $password)
-            } header: {
-              Text("WebDAV 服务器")
-            } footer: {
-              Text("支持坚果云、NAS 等标准 WebDAV；填漫画所在的目录地址。")
+              VStack(spacing: 10) {
+                Image(systemName: "cloud.fill")
+                  .font(.system(size: 26))
+                  .foregroundStyle(.white)
+                  .frame(width: 62, height: 62)
+                  .background(
+                    LinearGradient(
+                      colors: [.hex(0x6C7BD0), .hex(0x4A56A8)],
+                      startPoint: .topLeading, endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 16)
+                  )
+                  .shadow(color: .hex(0x6C7BD0).opacity(0.4), radius: 8, y: 4)
+                Text("连接 WebDAV 服务器")
+                  .font(.headline)
+                Text("支持坚果云、NAS 等标准 WebDAV\n填写漫画所在目录的地址")
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                  .multilineTextAlignment(.center)
+              }
+              .frame(maxWidth: .infinity)
+              .padding(.vertical, 10)
+              .listRowBackground(Color.clear)
             }
+
+            Section {
+              HStack(spacing: 10) {
+                Image(systemName: "link")
+                  .foregroundStyle(.secondary)
+                  .frame(width: 22)
+                TextField("服务器地址", text: $address)
+                  .keyboardType(.URL)
+                  .autocorrectionDisabled()
+                  .textInputAutocapitalization(.never)
+              }
+              HStack(spacing: 10) {
+                Image(systemName: "person")
+                  .foregroundStyle(.secondary)
+                  .frame(width: 22)
+                TextField("用户名（可选）", text: $username)
+                  .autocorrectionDisabled()
+                  .textInputAutocapitalization(.never)
+              }
+              HStack(spacing: 10) {
+                Image(systemName: "lock")
+                  .foregroundStyle(.secondary)
+                  .frame(width: 22)
+                SecureField("密码 / 应用密码（可选）", text: $password)
+              }
+            }
+
+            Section {
+              Button {
+                Task { await primaryAction() }
+              } label: {
+                HStack(spacing: 8) {
+                  if busy {
+                    ProgressView()
+                      .tint(.white)
+                  }
+                  Text("连接服务器")
+                    .font(.subheadline.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+              }
+              .buttonStyle(.borderedProminent)
+              .tint(.cinnabar)
+              .disabled(busy || address.count < 8)
+              .listRowInsets(EdgeInsets())
+              .listRowBackground(Color.clear)
+            }
+
             if let message {
               Section {
                 Label(message, systemImage: message.contains("成功") ? "checkmark.circle" : "exclamationmark.triangle")
@@ -67,30 +127,40 @@ struct WebDAVSetupView: View {
           }
         case .browse:
           List {
-            if !path.isEmpty {
-              Button {
-                path.removeLast()
-                let target = path.last?.url ?? currentURL
-                if let target {
-                  Task { await load(url: target) }
+            Section {
+              if !path.isEmpty {
+                Button {
+                  path.removeLast()
+                  let target = path.last?.url ?? currentURL
+                  if let target {
+                    Task { await load(url: target) }
+                  }
+                } label: {
+                  Label("上一级", systemImage: "arrow.up")
                 }
-              } label: {
-                Label("上一级", systemImage: "arrow.up")
               }
-            }
-            ForEach(items.filter(\.isDirectory), id: \.url) { item in
-              Button {
-                path.append(item)
-                Task { await load(url: item.url) }
-              } label: {
-                Label(item.name, systemImage: "folder")
+              ForEach(items.filter(\.isDirectory), id: \.url) { item in
+                Button {
+                  path.append(item)
+                  Task { await load(url: item.url) }
+                } label: {
+                  HStack(spacing: 10) {
+                    Image(systemName: "folder.fill")
+                      .foregroundStyle(.cinnabar.opacity(0.8))
+                    Text(item.name)
+                      .foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                      .font(.caption.weight(.semibold))
+                      .foregroundStyle(.tertiary)
+                  }
+                }
               }
-            }
-            let loose = items.filter { $0.isArchive || $0.isPDF }.count
-            if loose > 0 {
-              Text("此处有 \(loose) 个压缩包 / PDF，可直接挂载")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            } footer: {
+              let loose = items.filter { $0.isArchive || $0.isPDF }.count
+              if loose > 0 {
+                Text("此处有 \(loose) 个压缩包 / PDF，可直接挂载")
+              }
             }
           }
           .overlay {
@@ -106,12 +176,22 @@ struct WebDAVSetupView: View {
         ToolbarItem(placement: .cancellationAction) {
           Button("取消") { dismiss() }
         }
-        ToolbarItem(placement: .confirmationAction) {
-          Button(phase == .form ? "连接" : "挂载此文件夹") {
-            Task { await primaryAction() }
+        if phase == .browse {
+          ToolbarItem(placement: .confirmationAction) {
+            Button("挂载此文件夹") {
+              Task { await primaryAction() }
+            }
+            .disabled(busy)
           }
-          .disabled(busy || (phase == .form && address.count < 8))
         }
+      }
+      .alert("挂载失败", isPresented: Binding(
+        get: { phase == .browse && message != nil },
+        set: { if !$0 { message = nil } }
+      )) {
+        Button("好") { message = nil }
+      } message: {
+        Text(message ?? "")
       }
     }
   }

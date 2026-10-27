@@ -31,53 +31,99 @@ struct Cloud189LoginView: View {
       Group {
         switch phase {
         case .qr:
-          VStack(spacing: 18) {
-            if let qrImage {
-              Image(uiImage: qrImage)
-                .interpolation(.none)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 220, height: 220)
-                .background(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            } else {
-              ProgressView().frame(width: 220, height: 220)
+          VStack(spacing: 22) {
+            VStack(spacing: 10) {
+              Image(systemName: "icloud.fill")
+                .font(.system(size: 26))
+                .foregroundStyle(.white)
+                .frame(width: 62, height: 62)
+                .background(
+                  LinearGradient(
+                    colors: [.cinnabar, .hex(0x8F2F1F)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                  ),
+                  in: RoundedRectangle(cornerRadius: 16)
+                )
+                .shadow(color: Color.cinnabar.opacity(0.4), radius: 8, y: 4)
+              Text("登录天翼云盘")
+                .font(.headline)
+              Text("用手机天翼云盘 App 扫一扫并确认")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
+
+            Group {
+              if let qrImage {
+                Image(uiImage: qrImage)
+                  .interpolation(.none)
+                  .resizable()
+                  .scaledToFit()
+                  .padding(14)
+                  .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                  .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+              } else {
+                RoundedRectangle(cornerRadius: 16)
+                  .fill(Color(.secondarySystemGroupedBackground))
+                  .overlay(ProgressView())
+              }
+            }
+            .frame(width: 236, height: 236)
+
             Text(statusText)
-              .font(.subheadline)
+              .font(.footnote)
               .foregroundStyle(.secondary)
-            Button("刷新二维码") {
+              .padding(.horizontal, 14)
+              .padding(.vertical, 7)
+              .background(Color(.secondarySystemGroupedBackground), in: Capsule())
+
+            Button {
               startQRLogin()
+            } label: {
+              Label("刷新二维码", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
+
+            Text("登录凭证只保存在本机钥匙串，卸载前不会丢失")
+              .font(.caption2)
+              .foregroundStyle(.tertiary)
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         case .browse:
           List {
             scopePicker
-            if let parent = path.last {
-              Button {
-                path.removeLast()
-                let target = path.last
-                Task { await load(folderId: target?.id ?? rootFolderId) }
-              } label: {
-                Label("上一级", systemImage: "arrow.up")
+            Section {
+              if path.last != nil {
+                Button {
+                  path.removeLast()
+                  let target = path.last
+                  Task { await load(folderId: target?.id ?? rootFolderId) }
+                } label: {
+                  Label("上一级", systemImage: "arrow.up")
+                }
               }
-            }
-            ForEach(items.filter(\.isDirectory), id: \.id) { item in
-              Button {
-                path.append(item)
-                Task { await load(folderId: item.id) }
-              } label: {
-                Label(item.name, systemImage: "folder")
+              ForEach(items.filter(\.isDirectory), id: \.id) { item in
+                Button {
+                  path.append(item)
+                  Task { await load(folderId: item.id) }
+                } label: {
+                  HStack(spacing: 10) {
+                    Image(systemName: "folder.fill")
+                      .foregroundStyle(.cinnabar.opacity(0.8))
+                    Text(item.name)
+                      .foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                      .font(.caption.weight(.semibold))
+                      .foregroundStyle(.tertiary)
+                  }
+                }
               }
-            }
-            let loose = items.filter { $0.isArchive || $0.isPDF }.count
-            if loose > 0 {
-              Text("此处有 \(loose) 个压缩包 / PDF，可直接挂载")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            } footer: {
+              let loose = items.filter { $0.isArchive || $0.isPDF }.count
+              if loose > 0 {
+                Text("此处有 \(loose) 个压缩包 / PDF，可直接挂载")
+              }
             }
           }
           .overlay { if busy { ProgressView() } }
@@ -98,6 +144,14 @@ struct Cloud189LoginView: View {
               .disabled(busy)
           }
         }
+      }
+      .alert("挂载失败", isPresented: Binding(
+        get: { message != nil },
+        set: { if !$0 { message = nil } }
+      )) {
+        Button("好") { message = nil }
+      } message: {
+        Text(message ?? "")
       }
     }
     .onAppear {

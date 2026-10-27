@@ -163,7 +163,8 @@ struct ReaderView: View {
       } label: {
         Image(systemName: "chevron.down")
           .font(.body.weight(.semibold))
-          .frame(width: 34, height: 34)
+          .frame(width: 36, height: 36)
+          .background(.white.opacity(0.14), in: Circle())
       }
       .tint(.white)
 
@@ -180,22 +181,12 @@ struct ReaderView: View {
       .frame(maxWidth: .infinity, alignment: .leading)
 
       Button {
-        showJumpSheet = true
-      } label: {
-        Text(pageChip(vm))
-          .font(.footnote.monospacedDigit())
-          .foregroundStyle(.white)
-          .padding(.horizontal, 10)
-          .padding(.vertical, 6)
-          .background(.white.opacity(0.14), in: Capsule())
-      }
-
-      Button {
         showTOC = true
       } label: {
         Image(systemName: "list.bullet")
           .font(.body)
-          .frame(width: 34, height: 34)
+          .frame(width: 36, height: 36)
+          .background(.white.opacity(0.14), in: Circle())
       }
       .tint(.white)
     }
@@ -209,82 +200,106 @@ struct ReaderView: View {
     )
   }
 
-  private func pageChip(_ vm: ReaderViewModel) -> String {
-    if vm.pageCount > 0 {
-      "\(vm.page + 1) / \(vm.pageCount)"
-    } else {
-      "\(vm.page + 1) / ?"
-    }
-  }
+  // MARK: - 底栏（玻璃控制条 + 页码滑条）
 
   private func bottomBar(_ vm: ReaderViewModel) -> some View {
-    HStack(spacing: 14) {
-      Button {
-        Task { await vm.goToChapter(offset: -1, landing: -1) }
-      } label: {
-        Image(systemName: "chevron.left.circle")
-          .font(.title3)
+    VStack(spacing: 12) {
+      if vm.effectiveMode == .single, vm.pageCount > 1 {
+        PageScrubber(vm: vm)
+      } else if vm.pageCount > 0 {
+        ProgressView(value: Double(vm.page + 1) / Double(max(vm.pageCount, 1)))
+          .tint(.white.opacity(0.85))
+          .scaleEffect(x: 1, y: 0.6, anchor: .center)
+          .padding(.horizontal, 14)
+          .contentShape(Rectangle())
+          .onTapGesture { showJumpSheet = true }
       }
-      .tint(.white)
-      .disabled(vm.prevChapter == nil)
-      .opacity(vm.prevChapter == nil ? 0.35 : 1)
 
-      Group {
+      HStack(spacing: 0) {
+        chapterButton("backward.end", enabled: vm.prevChapter != nil) {
+          Task { await vm.goToChapter(offset: -1, landing: -1) }
+        }
+
+        Spacer()
+
         if vm.isPDF {
           Text("PDF · 连续阅读")
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.white.opacity(0.85))
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.white.opacity(0.8))
         } else {
-          Picker("模式", selection: Binding(
-            get: { vm.prefs.mode },
-            set: { vm.setMode($0) }
-          )) {
-            Text("单页").tag(ReaderMode.single)
-            Text("条漫").tag(ReaderMode.webtoon)
+          controlButton(
+            icon: vm.prefs.mode == .single ? "rectangle.portrait" : "rectangle.portrait.on.rectangle.portrait",
+            label: vm.prefs.mode == .single ? "单页" : "条漫"
+          ) {
+            vm.setMode(vm.prefs.mode == .single ? .webtoon : .single)
           }
-          .pickerStyle(.segmented)
-          .frame(width: 132)
+        }
+
+        Spacer()
+
+        controlButton(
+          icon: vm.prefs.rtl ? "arrow.left.to.line" : "arrow.right.to.line",
+          label: vm.prefs.rtl ? "日漫" : "西漫"
+        ) {
+          vm.setRTL(!vm.prefs.rtl)
+        }
+
+        Spacer()
+
+        if !vm.isPDF {
+          controlButton(
+            icon: vm.prefs.fit == .width ? "arrow.left.and.right" : "arrow.up.and.down",
+            label: vm.prefs.fit.label
+          ) {
+            vm.setFit(vm.prefs.fit == .width ? .height : .width)
+          }
+          Spacer()
+        }
+
+        chapterButton("forward.end", enabled: vm.nextChapter != nil) {
+          Task { await vm.goToChapter(offset: 1, landing: 0) }
         }
       }
-      .frame(maxWidth: .infinity)
-
-      Button {
-        Task { await vm.goToChapter(offset: 1, landing: 0) }
-      } label: {
-        Image(systemName: "chevron.right.circle")
-          .font(.title3)
-      }
-      .tint(.white)
-      .disabled(vm.nextChapter == nil)
-      .opacity(vm.nextChapter == nil ? 0.35 : 1)
-
-      Divider()
-        .frame(height: 20)
-
-      Button {
-        vm.setRTL(!vm.prefs.rtl)
-      } label: {
-        Text(vm.prefs.rtl ? "日漫" : "西漫")
-          .font(.footnote.weight(.medium))
-      }
-      .tint(.white)
-
-      Button {
-        vm.setFit(vm.prefs.fit == .width ? .height : .width)
-      } label: {
-        Text(vm.prefs.fit.label)
-          .font(.footnote.weight(.medium))
-      }
-      .tint(.white)
+      .padding(.horizontal, 16)
+      .padding(.vertical, 8)
+      .background(.ultraThinMaterial, in: Capsule())
     }
     .padding(.horizontal, 14)
     .padding(.top, 10)
     .padding(.bottom, 8)
     .background(
-      LinearGradient(colors: [.black.opacity(0), .black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
+      LinearGradient(colors: [.black.opacity(0), .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
         .allowsHitTesting(false)
         .ignoresSafeArea(edges: .bottom)
     )
+  }
+
+  private func chapterButton(_ icon: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Image(systemName: icon)
+        .font(.body.weight(.semibold))
+        .frame(width: 42, height: 42)
+        .background(.white.opacity(enabled ? 0.14 : 0.05), in: Circle())
+    }
+    .tint(.white)
+    .disabled(!enabled)
+    .opacity(enabled ? 1 : 0.35)
+  }
+
+  private func controlButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      VStack(spacing: 2) {
+        Image(systemName: icon)
+          .font(.body.weight(.medium))
+          .frame(height: 20)
+        Text(label)
+          .font(.system(size: 10, weight: .medium))
+          .foregroundStyle(.white.opacity(0.65))
+      }
+      .frame(width: 52, height: 42)
+      .contentShape(Rectangle())
+    }
+    .tint(.white)
   }
 
   #if DEBUG
@@ -306,6 +321,40 @@ struct ReaderView: View {
   #endif
 
   // MARK: - 跳页
+
+  /// 单页模式页码滑条：拖动中只改本地值，松手才落页（避免连翻解码）
+  private struct PageScrubber: View {
+    let vm: ReaderViewModel
+    @State private var scrubbing = false
+    @State private var localPage: Double = 0
+
+    var body: some View {
+      HStack(spacing: 12) {
+        Text("\(Int(localPage.rounded()) + 1)")
+          .font(.footnote.monospacedDigit().weight(.medium))
+          .foregroundStyle(.white)
+          .frame(width: 34, alignment: .leading)
+        Slider(
+          value: $localPage,
+          in: 0...Double(max(vm.pageCount - 1, 0))
+        ) { editing in
+          scrubbing = editing
+          if !editing {
+            vm.setPage(Int(localPage.rounded()))
+          }
+        }
+        .tint(.white.opacity(0.9))
+        Text("\(vm.pageCount)")
+          .font(.footnote.monospacedDigit())
+          .foregroundStyle(.white.opacity(0.55))
+          .frame(width: 34, alignment: .trailing)
+      }
+      .onAppear { localPage = Double(vm.page) }
+      .onChange(of: vm.page) { _, new in
+        if !scrubbing { localPage = Double(new) }
+      }
+    }
+  }
 
   private struct JumpSheet: View {
     let vm: ReaderViewModel

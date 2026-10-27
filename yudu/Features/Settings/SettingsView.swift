@@ -30,13 +30,15 @@ struct SettingsView: View {
   // MARK: - 外观
 
   private var appearanceSection: some View {
-    Section("外观") {
+    Section {
       Picker("模式", selection: $appearanceRaw) {
         ForEach(AppearanceMode.allCases) { mode in
           Text(mode.label).tag(mode.rawValue)
         }
       }
       .pickerStyle(.segmented)
+    } header: {
+      Label("外观", systemImage: "circle.lefthalf.filled")
     }
   }
 
@@ -65,7 +67,7 @@ struct SettingsView: View {
         set: { defaults.rtl = $0; defaults.save() }
       ))
     } header: {
-      Text("阅读")
+      Label("阅读", systemImage: "book")
     } footer: {
       Text("只对没有单独调过设置的漫画生效；阅读器里改的会按书记住。")
     }
@@ -98,7 +100,7 @@ struct SettingsView: View {
         set: { eyeCare.scheduleEnabled = $0; eyeCare.save() }
       ))
     } header: {
-      Text("护眼")
+      Label("护眼", systemImage: "eye")
     } footer: {
       Text("只作用于阅读画面，不影响其他页面。")
     }
@@ -164,7 +166,7 @@ struct SettingsView: View {
         }
       }
     } header: {
-      Text("书库")
+      Label("书库", systemImage: "books.vertical")
     } footer: {
       Text("移除书库只删阅读进度与记录，授权文件夹和原文件不受影响；导入文件库会删除拷贝进来的副本。")
     }
@@ -208,7 +210,20 @@ struct SettingsView: View {
   private var webdavCacheSection: some View {
     Section {
       let bytes = WebDAVCache.shared.usageBytes()
+      let cap = WebDAVCache.shared.capBytes
       LabeledContent("已用缓存", value: ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+      if cap > 0 {
+        VStack(alignment: .leading, spacing: 5) {
+          ProgressView(
+            value: Double(min(bytes, cap)),
+            total: Double(cap)
+          )
+          .tint(.cinnabar)
+          Text("上限 \(ByteCountFormatter.string(fromByteCount: cap, countStyle: .file))，超出后按最久未看清理")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+      }
       Picker("容量上限", selection: Binding(
         get: { WebDAVCache.shared.capBytes },
         set: { WebDAVCache.shared.capBytes = $0; cacheUsage += 1 }
@@ -226,7 +241,7 @@ struct SettingsView: View {
       }
       .disabled(bytes == 0)
     } header: {
-      Text("云端离线缓存")
+      Label("云端离线缓存", systemImage: "icloud.and.arrow.down")
     } footer: {
       Text(WebDAVCache.shared.diskless
         ? "无盘模式：阅读不写硬盘，整包在内存中直接读（超过 600MB 的大包会临时落盘）；手动点“离线缓存整部”仍会写盘。"
@@ -246,9 +261,44 @@ struct SettingsView: View {
   // MARK: - 关于
 
   private var aboutSection: some View {
-    Section("关于") {
-      LabeledContent("雨读", value: "iOS 1.0")
+    Section {
+      HStack(spacing: 12) {
+        AppBadge()
+          .frame(width: 44, height: 44)
+        VStack(alignment: .leading, spacing: 2) {
+          Text("雨读 Yudu")
+            .font(.subheadline.weight(.semibold))
+          Text("iOS \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+      .padding(.vertical, 2)
       LabeledContent("桌面版", value: "雨读 Yudu")
+    } header: {
+      Label("关于", systemImage: "info.circle")
+    }
+  }
+}
+
+// MARK: - App 徽标（设置页关于区用，画一枚与 App 图标同款的小图标）
+
+private struct AppBadge: View {
+  var body: some View {
+    ZStack {
+      RoundedRectangle(cornerRadius: 10)
+        .fill(LinearGradient(
+          colors: [Color(hex: 0xC9543D), Color(hex: 0x6B1F12)],
+          startPoint: .top, endPoint: .bottom
+        ))
+      VStack(spacing: 3) {
+        Image(systemName: "drop.fill")
+          .font(.system(size: 12))
+          .foregroundStyle(Color(hex: 0xF7EEE1))
+        Image(systemName: "book.fill")
+          .font(.system(size: 11))
+          .foregroundStyle(Color(hex: 0xF7EEE1))
+      }
     }
   }
 }

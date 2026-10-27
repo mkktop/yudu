@@ -109,47 +109,70 @@ struct SeriesDetailView: View {
 
   // MARK: - 作品卡
 
+  private var palette: CoverPalette { CoverPalette.palette(for: series.key) }
+
   private var hero: some View {
     Section {
-      HStack(alignment: .top, spacing: 14) {
-        CoverImage(seriesKey: series.key)
-          .frame(width: 104, height: 138)
-          .clipShape(RoundedRectangle(cornerRadius: 10))
-          .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
+      VStack(alignment: .leading, spacing: 14) {
+        HStack(alignment: .center, spacing: 14) {
+          CoverImage(seriesKey: series.key, title: series.title)
+            .frame(width: 116, height: 154)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.28), radius: 8, y: 4)
 
-        VStack(alignment: .leading, spacing: 8) {
-          Text(series.title)
-            .font(.headline)
-            .lineLimit(3)
+          VStack(alignment: .leading, spacing: 7) {
+            statusPill
+            Text(series.title)
+              .font(.headline)
+              .lineLimit(3)
 
-          let info = Queries.info(series)
-          Text("已读 \(info.read) / \(info.total) 话 · \(Int(info.fraction * 100))%")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+            let info = Queries.info(series)
+            Text("已读 \(info.read) / \(info.total) 话")
+              .font(.footnote.monospacedDigit())
+              .foregroundStyle(.secondary)
 
-          ProgressView(value: info.fraction)
-            .tint(.cinnabar)
-
-          continueButton
-
-          if series.library?.kind == "webdav" || series.library?.kind == "cloud189" {
-            offlineButton
+            ProgressView(value: info.fraction)
+              .tint(.cinnabar)
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+
+        continueButton
+        if series.library?.kind == "webdav" || series.library?.kind == "cloud189" {
+          offlineButton
+        }
       }
-      .padding(.vertical, 6)
+      .padding(.vertical, 16)
       .listRowBackground(
         ZStack {
-          CoverImage(seriesKey: series.key)
-            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-            .scaledToFill()
-            .blur(radius: 36)
-            .opacity(0.25)
           Color(.secondarySystemGroupedBackground)
+          LinearGradient(
+            colors: [palette.top.opacity(0.16), palette.bottom.opacity(0.28)],
+            startPoint: .topLeading, endPoint: .bottomTrailing
+          )
+          CoverImage(seriesKey: series.key, title: series.title)
+            .blur(radius: 40)
+            .opacity(0.16)
         }
+        .clipped()
       )
     }
+  }
+
+  @ViewBuilder
+  private var statusPill: some View {
+    let info = Queries.info(series)
+    let (text, color): (String, Color) = switch info.status {
+    case .finished: ("已读完", .green)
+    case .reading: ("在读 · \(Int(info.fraction * 100))%", .cinnabar)
+    case .unread: ("未读", Color(.tertiaryLabel))
+    }
+    Text(text)
+      .font(.caption.weight(.semibold))
+      .padding(.horizontal, 9)
+      .padding(.vertical, 4)
+      .background(color.opacity(0.14), in: Capsule())
+      .foregroundStyle(color)
   }
 
   @ViewBuilder
@@ -162,18 +185,22 @@ struct SeriesDetailView: View {
       NavigationLink(
         value: BookshelfRoute.reader(series: series, startChapter: target)
       ) {
-        VStack(spacing: 2) {
-          Text(label)
-            .font(.subheadline.weight(.semibold))
-          if !targetTitle.isEmpty {
-            Text(targetTitle)
-              .font(.caption2)
-              .lineLimit(1)
-              .opacity(0.85)
+        HStack(spacing: 8) {
+          Image(systemName: "book.pages")
+            .font(.subheadline)
+          VStack(spacing: 1) {
+            Text(label)
+              .font(.subheadline.weight(.semibold))
+            if !targetTitle.isEmpty {
+              Text(targetTitle)
+                .font(.caption2)
+                .lineLimit(1)
+                .opacity(0.85)
+            }
           }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 9)
+        .padding(.vertical, 10)
       }
       .buttonStyle(.borderedProminent)
     }
@@ -220,7 +247,7 @@ struct SeriesDetailView: View {
   // MARK: - 章节列表
 
   private var chapterSections: some View {
-    Section("章节") {
+    Section {
       if orderedChapters.isEmpty {
         Text("没有章节，试试下拉书架重新扫描")
           .font(.subheadline)
@@ -232,16 +259,21 @@ struct SeriesDetailView: View {
             chapterRow(chapter)
           }
         } label: {
-          HStack {
+          HStack(spacing: 10) {
+            Image(systemName: "book.closed")
+              .font(.footnote)
+              .foregroundStyle(.cinnabar.opacity(0.75))
             Text(group.volume.map { "第 \($0) 卷" } ?? "未分卷")
               .font(.subheadline.weight(.medium))
             Spacer()
             Text("\(group.chapters.count) 话")
-              .font(.caption)
+              .font(.caption.monospacedDigit())
               .foregroundStyle(.secondary)
           }
         }
       }
+    } header: {
+      Text("章节")
     }
   }
 
@@ -263,13 +295,23 @@ struct SeriesDetailView: View {
       value: BookshelfRoute.reader(series: series, startChapter: chapter)
     ) {
       HStack(spacing: 10) {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
           Text(chapter.title)
             .font(.subheadline)
             .lineLimit(1)
           Text(chapterStatus(chapter))
             .font(.caption2)
             .foregroundStyle(chapter.progress?.completed == true ? .green : .secondary)
+          if let progress = chapter.progress,
+             chapter.progress?.completed != true,
+             chapter.pageCount > 0 {
+            ProgressView(
+              value: Double(progress.page + 1) / Double(chapter.pageCount)
+            )
+            .tint(.cinnabar)
+            .scaleEffect(x: 1, y: 0.5, anchor: .center)
+            .padding(.trailing, 40)
+          }
         }
         Spacer()
         Button {
@@ -281,7 +323,7 @@ struct SeriesDetailView: View {
             ? "checkmark.circle.fill"
             : "circle")
             .font(.title3)
-            .foregroundStyle(chapter.progress?.completed == true ? .green : .secondary)
+            .foregroundStyle(chapter.progress?.completed == true ? .green : Color(.quaternaryLabel))
         }
         .buttonStyle(.plain)
       }

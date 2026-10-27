@@ -5,14 +5,24 @@ struct StatsView: View {
   @Environment(\.modelContext) private var context
 
   @State private var summary: Queries.StatsSummary?
+  @State private var range: HeatRange = .halfYear
+
+  enum HeatRange: String, CaseIterable, Identifiable {
+    case halfYear = "近半年"
+    case year = "近一年"
+
+    var id: String { rawValue }
+    var weeks: Int { self == .halfYear ? 26 : 53 }
+  }
 
   var body: some View {
     NavigationStack {
       Group {
         if let summary {
           ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-              cards(summary)
+            VStack(alignment: .leading, spacing: 16) {
+              heroCard(summary)
+              metricCards(summary)
               heatmap(summary)
             }
             .padding(16)
@@ -29,13 +39,60 @@ struct StatsView: View {
     }
   }
 
+  // MARK: - 连续阅读主卡
+
+  private func heroCard(_ summary: Queries.StatsSummary) -> some View {
+    let todayPages = summary.days[Queries.dayKey(.now)] ?? 0
+    return HStack(alignment: .center, spacing: 14) {
+      Image(systemName: "flame.fill")
+        .font(.system(size: 34))
+        .foregroundStyle(.white.opacity(0.9))
+        .frame(width: 64, height: 64)
+        .background(.white.opacity(0.16), in: Circle())
+
+      VStack(alignment: .leading, spacing: 3) {
+        Text("\(summary.streak) 天")
+          .font(.system(size: 30, weight: .bold, design: .rounded))
+          .monospacedDigit()
+          .foregroundStyle(.white)
+        Text("连续阅读")
+          .font(.subheadline)
+          .foregroundStyle(.white.opacity(0.75))
+      }
+
+      Spacer()
+
+      if todayPages > 0 {
+        VStack(spacing: 2) {
+          Text("\(todayPages)")
+            .font(.title3.weight(.bold).monospacedDigit())
+          Text("今日页")
+            .font(.caption2)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 12))
+      }
+    }
+    .padding(18)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      LinearGradient(
+        colors: [Color.cinnabar, Color(hex: 0x8F2F1F)],
+        startPoint: .topLeading, endPoint: .bottomTrailing
+      ),
+      in: RoundedRectangle(cornerRadius: 18)
+    )
+    .shadow(color: Color.cinnabar.opacity(0.35), radius: 10, y: 5)
+  }
+
   // MARK: - 指标卡
 
-  private func cards(_ summary: Queries.StatsSummary) -> some View {
-    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-      StatCard(title: "连续", value: "\(summary.streak) 天", icon: "flame.fill")
-      StatCard(title: "累计", value: "\(summary.totalPages) 页", icon: "book.pages.fill")
-      StatCard(title: "阅读天数", value: "\(summary.totalDays) 天", icon: "calendar")
+  private func metricCards(_ summary: Queries.StatsSummary) -> some View {
+    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+      StatCard(title: "累计翻页", value: summary.totalPages.formatted(), icon: "book.pages.fill")
+      StatCard(title: "阅读天数", value: "\(summary.totalDays)", icon: "calendar")
     }
   }
 
@@ -43,47 +100,60 @@ struct StatsView: View {
 
   private func heatmap(_ summary: Queries.StatsSummary) -> some View {
     VStack(alignment: .leading, spacing: 10) {
-      Text("最近一年")
-        .font(.headline)
+      HStack {
+        Text("阅读热力")
+          .font(.headline)
+        Spacer()
+        Picker("范围", selection: $range) {
+          ForEach(HeatRange.allCases) { range in
+            Text(range.rawValue).tag(range)
+          }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 168)
+      }
 
-      let weeks = Self.weekBuckets(summary.days)
+      let weeks = Self.weekBuckets(summary.days, weeks: range.weeks)
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(alignment: .top, spacing: 10) {
           // 星期标签（周日起）
-          VStack(alignment: .trailing, spacing: 2) {
+          VStack(alignment: .trailing, spacing: 2.5) {
             ForEach(0..<7, id: \.self) { day in
               Text(Self.weekdayLabel(day))
-                .font(.system(size: 9))
+                .font(.system(size: 8))
                 .foregroundStyle(.secondary)
-                .frame(height: 12)
+                .frame(height: 11)
             }
           }
-          HStack(spacing: 3) {
-            ForEach(weeks, id: \.self) { week in
-              VStack(spacing: 3) {
+          HStack(spacing: 2.5) {
+            ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
+              VStack(spacing: 2.5) {
                 ForEach(0..<7, id: \.self) { day in
                   if let cell = week.first(where: { $0.weekday == day }) {
-                    RoundedRectangle(cornerRadius: 2.5)
+                    RoundedRectangle(cornerRadius: 2)
                       .fill(cell.color)
-                      .frame(width: 12, height: 12)
+                      .frame(width: 11, height: 11)
                   } else {
-                    Color.clear.frame(width: 12, height: 12)
+                    Color.clear.frame(width: 11, height: 11)
                   }
                 }
               }
             }
           }
         }
-        .padding(2)
+        .padding(1)
       }
 
       HStack(spacing: 6) {
+        Text("按天计页，颜色越深读得越多")
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
         Spacer()
         Text("少")
           .font(.system(size: 9))
           .foregroundStyle(.secondary)
         ForEach(0...4, id: \.self) { level in
-          RoundedRectangle(cornerRadius: 2.5)
+          RoundedRectangle(cornerRadius: 2)
             .fill(Self.levelColor(level))
             .frame(width: 10, height: 10)
         }
@@ -93,7 +163,7 @@ struct StatsView: View {
       }
     }
     .padding(14)
-    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
   }
 
   // MARK: - 数据
@@ -105,14 +175,14 @@ struct StatsView: View {
     var color: Color { StatsView.levelColor(level) }
   }
 
-  /// 生成按周分列的热力图格子（与 GitHub 一致：列 = 周，行 = 周日…周六）
-  static func weekBuckets(_ days: [String: Int]) -> [[HeatCell]] {
+  /// 生成按周分列的热力图格子（列 = 周，行 = 周日…周六），取最近 N 周
+  static func weekBuckets(_ days: [String: Int], weeks targetWeeks: Int) -> [[HeatCell]] {
     let calendar = Calendar.current
     let today = calendar.startOfDay(for: .now)
     let weekdayToday = calendar.component(.weekday, from: today) // 1=周日
 
-    // 从 52 周前的周日开始
-    let daysBack = 7 * 52 + (weekdayToday - 1)
+    // 从 targetWeeks-1 周前的周日开始
+    let daysBack = 7 * (targetWeeks - 1) + (weekdayToday - 1)
     guard let start = calendar.date(byAdding: .day, value: -daysBack, to: today) else { return [] }
 
     var weeks: [[HeatCell]] = []
@@ -176,16 +246,25 @@ private struct StatCard: View {
   let icon: String
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Label(title, systemImage: icon)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      Text(value)
-        .font(.title3.weight(.semibold).monospacedDigit())
-        .foregroundStyle(.primary)
+    HStack(spacing: 12) {
+      Image(systemName: icon)
+        .font(.title3)
+        .foregroundStyle(.cinnabar)
+        .frame(width: 42, height: 42)
+        .background(Color.cinnabar.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+      VStack(alignment: .leading, spacing: 2) {
+        Text(value)
+          .font(.title2.weight(.bold).monospacedDigit())
+          .foregroundStyle(.primary)
+          .lineLimit(1)
+          .minimumScaleFactor(0.6)
+        Text(title)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      Spacer(minLength: 0)
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
     .padding(12)
-    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
   }
 }
