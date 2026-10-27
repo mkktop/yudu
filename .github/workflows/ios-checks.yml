@@ -30,3 +30,11 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO \
             IPHONEOS_DEPLOYMENT_TARGET=18.0 SUPPORTED_PLATFORMS=iphonesimulator build
+      - name: Run offline simulator smoke test
+        run: bash tools/simulator-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulator-screenshots
+          path: build/simulator-shots
+          if-no-files-found: warn

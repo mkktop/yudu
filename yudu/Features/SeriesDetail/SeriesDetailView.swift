@@ -33,9 +33,10 @@ struct SeriesDetailView: View {
 
   var body: some View {
     let _ = refreshTick
+    let targetID = Queries.continueTarget(series)?.persistentModelID
     ScrollViewReader { proxy in
       ScrollView {
-        VStack(alignment: .leading, spacing: 24) {
+        LazyVStack(alignment: .leading, spacing: 24) {
           hero
           HStack {
             SectionHeading(title: "章节目录", eyebrow: "CHAPTER INDEX", detail: "\(orderedChapters.count) 话")
@@ -63,7 +64,7 @@ struct SeriesDetailView: View {
             NoticeView(title: orderedChapters.isEmpty ? "还没有可读章节" : "所有章节都已读完", message: orderedChapters.isEmpty ? "返回书架下拉刷新，或到书库检查来源。" : "关闭「只看未读」可以重新阅读。", icon: "book.closed")
           }
           ForEach(groups) { group in
-            VStack(spacing: 0) {
+            LazyVStack(spacing: 0) {
               Button {
                 if collapsedVolumes.contains(group.id) { collapsedVolumes.remove(group.id) }
                 else { collapsedVolumes.insert(group.id) }
@@ -81,7 +82,7 @@ struct SeriesDetailView: View {
               if !collapsedVolumes.contains(group.id) {
                 ForEach(group.chapters) { chapter in
                   Divider().overlay(YuduTheme.line).padding(.horizontal, 16)
-                  chapterRow(chapter).id(chapter.persistentModelID)
+                  chapterRow(chapter, current: chapter.persistentModelID == targetID).id(chapter.persistentModelID)
                 }
               }
             }.yuduPanel()
@@ -178,9 +179,8 @@ struct SeriesDetailView: View {
   }
 
   /// 导航与标记按钮是相邻控件，避免嵌套 Button 导致误触跳转。
-  private func chapterRow(_ chapter: ChapterEntity) -> some View {
+  private func chapterRow(_ chapter: ChapterEntity, current: Bool) -> some View {
     let completed = chapter.progress?.completed == true
-    let current = Queries.continueTarget(series)?.persistentModelID == chapter.persistentModelID
     return HStack(spacing: 0) {
       NavigationLink(value: BookshelfRoute.reader(series: series, startChapter: chapter)) {
         HStack(spacing: 12) {
