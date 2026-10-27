@@ -195,7 +195,7 @@ enum Queries {
 
   static func continueItems(_ seriesList: [SeriesEntity], limit: Int = 12) -> [ContinueItem] {
     let recent = seriesList
-      .filter { $0.lastReadAt != nil && info($0).status != .finished }
+      .filter { $0.lastReadAt != nil && info($0).status == .reading }
       .sorted { ($0.lastReadAt ?? .distantPast) > ($1.lastReadAt ?? .distantPast) }
     return Array(recent.compactMap { series -> ContinueItem? in
       guard let chapter = continueTarget(series) else { return nil }
@@ -287,9 +287,8 @@ enum Queries {
       p.updatedAt = .now
       if chapter.pageCount > 0 { p.page = chapter.pageCount - 1 }
     } else if let p = chapter.progress {
-      p.completed = false
-      p.page = 0
-      p.updatedAt = .now
+      chapter.progress = nil
+      context.delete(p)
     }
     chapter.series?.lastReadAt = .now
     try? context.save()

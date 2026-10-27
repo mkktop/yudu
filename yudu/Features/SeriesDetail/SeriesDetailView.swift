@@ -144,7 +144,7 @@ struct SeriesDetailView: View {
         }
         ProgressView(value: info.fraction).tint(YuduTheme.accent)
       }
-      if let target = Queries.continueTarget(series) {
+      if let target = info.status == .finished ? orderedChapters.first : Queries.continueTarget(series) {
         NavigationLink(value: BookshelfRoute.reader(series: series, startChapter: target)) {
           HStack(spacing: 10) {
             Image(systemName: "play.fill")

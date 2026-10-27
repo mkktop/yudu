@@ -58,7 +58,7 @@ struct SettingsView: View {
                 Text("\(dailyGoal) 页").monospacedDigit().foregroundStyle(YuduTheme.accent)
               }
             }
-            Text("目标会显示在统计页，只记录真实阅读，不发送提醒。")
+            Text("目标会显示在统计页。按翻页进度统计，手动标记已读不计入。")
               .font(.caption).foregroundStyle(YuduTheme.muted)
           }
           settingsGroup("离线缓存", eyebrow: "OFFLINE STORAGE") {
