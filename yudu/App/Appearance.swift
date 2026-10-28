@@ -25,16 +25,6 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
   }
 }
 
-extension Color {
-  /// 朱砂红：雨读的点缀色（对应桌面版纸墨书斋主题的主色）
-  static let cinnabar = Color(red: 0.72, green: 0.26, blue: 0.18)
-  static let inkPaper = Color(red: 0.97, green: 0.95, blue: 0.91)
-}
-
-extension ShapeStyle where Self == Color {
-  static var cinnabar: Color { Color.cinnabar }
-}
-
 // MARK: - 护眼
 
 /// 护眼设置（UserDefaults 持久化，阅读器内叠加滤镜）

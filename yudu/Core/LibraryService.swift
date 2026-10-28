@@ -188,13 +188,12 @@ final class LibraryService {
 
   /// 系列离线缓存进度（seriesKey → 0...1）
   var prefetchProgress: [String: Double] = [:]
+  var prefetchErrors: [String: String] = [:]
   private var prefetchTasks: [String: Task<Void, Never>] = [:]
 
   func togglePrefetch(_ series: SeriesEntity) {
     if let running = prefetchTasks[series.key] {
       running.cancel()
-      prefetchTasks[series.key] = nil
-      prefetchProgress[series.key] = nil
       return
     }
     guard let library = series.library else { return }
@@ -209,6 +208,7 @@ final class LibraryService {
     let cloud189: Cloud189Client? = library.kind == "cloud189" ? cloud189Client(forLibrary: library) : nil
     guard webdav != nil || cloud189 != nil else { return }
 
+    prefetchErrors[seriesKey] = nil
     prefetchProgress[seriesKey] = 0
     let task = Task { [weak self] in
       var done = 0
@@ -224,8 +224,8 @@ final class LibraryService {
               if let remote = await Cloud189FolderPageSource(
                 client: client, folderId: parsed.fileId, familyId: parsed.familyId, seriesKey: seriesKey
               ) {
-                await remote.prefetchAll()
-              }
+                if !(await remote.prefetchAll()) { failed += 1 }
+              } else { failed += 1 }
             } else {
               _ = try await WebDAVCache.shared.ensureChapter(
                 stableKey: chapter.path, ext: chapter.kind == "pdf" ? "pdf" : "zip", seriesKey: seriesKey,
@@ -237,8 +237,8 @@ final class LibraryService {
           } else if let url = URL(string: chapter.path), let client = webdav {
             if chapter.kind == "folder" {
               if let remote = await RemoteFolderPageSource(client: client, folderURL: url, seriesKey: seriesKey) {
-                await remote.prefetchAll()
-              }
+                if !(await remote.prefetchAll()) { failed += 1 }
+              } else { failed += 1 }
             } else {
               _ = try await WebDAVCache.shared.ensureChapter(url: url, seriesKey: seriesKey, client: client)
             }
@@ -255,6 +255,9 @@ final class LibraryService {
         var pinned = WebDAVCache.shared.pinnedSeries
         pinned.insert(seriesKey)
         WebDAVCache.shared.pinnedSeries = pinned
+      }
+      if !Task.isCancelled && failed > 0 {
+        self?.prefetchErrors[seriesKey] = "有 \(failed) 个章节未能缓存，请检查网络后重试。"
       }
       self?.prefetchProgress[seriesKey] = nil
       self?.prefetchTasks[seriesKey] = nil
@@ -324,12 +327,16 @@ final class LibraryService {
   }
 
   func rescanAll() async {
+    guard !isScanning else { return }
     let context = container.mainContext
     let descriptor = FetchDescriptor<LibraryEntity>()
     let libraries = (try? context.fetch(descriptor)) ?? []
+    var errors: [String] = []
     for library in libraries {
       await rescan(library)
+      errors += lastErrors.map { "\(library.name)：\($0)" }
     }
+    lastErrors = errors
   }
 
   /// App 启动时静默重扫（文件夹库权限可能失效，失败不弹窗）
@@ -454,6 +461,8 @@ final class LibraryService {
       WebDAVCache.shared.removeLibrary(prefix: library.key)
     }
     for series in library.series {
+      prefetchTasks[series.key]?.cancel()
+      prefetchErrors[series.key] = nil
       CoverStore.shared.remove(seriesKey: series.key)
     }
     context.delete(library)

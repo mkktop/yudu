@@ -356,12 +356,17 @@ nonisolated final class RemoteFolderPageSource: PageSource, @unchecked Sendable 
   }
 
   /// 离线预取：全部图片拉到本地缓存
-  func prefetchAll() async {
+  func prefetchAll() async -> Bool {
+    var complete = true
     for image in images {
+      guard !Task.isCancelled else { return false }
       if WebDAVCache.shared.imageURL(for: image.url) != nil { continue }
       if let data = try? await client.get(image.url) {
+        guard !Task.isCancelled else { return false }
         WebDAVCache.shared.storeImage(data, for: image.url, seriesKey: seriesKey)
-      }
+        if WebDAVCache.shared.imageURL(for: image.url) == nil { complete = false }
+      } else { complete = false }
     }
+    return complete
   }
 }

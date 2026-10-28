@@ -3,6 +3,7 @@ import Observation
 
 enum AppTab: Hashable {
   case bookshelf
+  case library
   case stats
   case settings
 }
@@ -12,6 +13,7 @@ enum AppTab: Hashable {
 @Observable
 final class AppRouter {
   var tab: AppTab = .bookshelf
+  var showImport = false
   var bookshelfPath: [BookshelfRoute] = []
   var statsPath: [StatsRoute] = []
   var settingsPath: [SettingsRoute] = []

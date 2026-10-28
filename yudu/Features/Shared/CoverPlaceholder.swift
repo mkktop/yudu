@@ -1,23 +1,17 @@
 import SwiftUI
 
-// MARK: - 程序化书脊封面
-//
-// 没有可生成封面的章节时，用书名 + key 哈希出一本"书"：
-// 布面配色渐变 + 宋体大水印字 + 右上竖排书名，视觉上像一册线装书。
-
+// MARK: - 程序化轨道封面
 struct CoverPalette {
   let top: Color
   let bottom: Color
 
   static let all: [CoverPalette] = [
-    .init(top: .hex(0x3D5A73), bottom: .hex(0x24384A)), // 黛蓝
-    .init(top: .hex(0x4A6B57), bottom: .hex(0x2C4033)), // 松绿
-    .init(top: .hex(0x6D4A6E), bottom: .hex(0x432C44)), // 绛紫
-    .init(top: .hex(0x96543A), bottom: .hex(0x5E3222)), // 赭石
-    .init(top: .hex(0x3E6B6B), bottom: .hex(0x24403F)), // 黛青
-    .init(top: .hex(0x7E3B47), bottom: .hex(0x4A2029)), // 酒红
-    .init(top: .hex(0x5A6B7E), bottom: .hex(0x37424F)), // 灰蓝
-    .init(top: .hex(0x7A6248), bottom: .hex(0x4A3A29)), // 茶褐
+    .init(top: .hex(0x234C61), bottom: .hex(0x0B1B30)),
+    .init(top: .hex(0x3D3868), bottom: .hex(0x17172E)),
+    .init(top: .hex(0x22544E), bottom: .hex(0x0A2428)),
+    .init(top: .hex(0x644A49), bottom: .hex(0x291D30)),
+    .init(top: .hex(0x304E77), bottom: .hex(0x101B35)),
+    .init(top: .hex(0x514067), bottom: .hex(0x241B32)),
   ]
 
   /// key 稳定哈希（djb2）取色，同一本书永远同色
@@ -42,39 +36,38 @@ extension Color {
   }
 }
 
-/// 占位封面：竖排书名 + 水印首字
+/// 无真实封面时的回退，不覆盖漫画本身的美术。
 struct PlaceholderCoverView: View {
   let title: String
   let key: String
-
   private var palette: CoverPalette { CoverPalette.palette(for: key) }
-  private var watermark: String { String(title.first ?? "书") }
-  private var spineChars: [Character] { Array(title.prefix(7).dropFirst()) }
 
   var body: some View {
-    ZStack {
-      LinearGradient(colors: [palette.top, palette.bottom], startPoint: .top, endPoint: .bottom)
-
-      Text(watermark)
-        .font(.custom("Songti SC", size: 150).weight(.bold))
-        .foregroundStyle(.white.opacity(0.15))
-        .offset(y: 8)
-
-      VStack(spacing: 5) {
-        Rectangle()
-          .fill(.white.opacity(0.6))
-          .frame(width: 1.5, height: 12)
-        ForEach(Array(spineChars.enumerated()), id: \.offset) { _, char in
-          Text(String(char))
-            .font(.custom("Songti SC", size: 15).weight(.semibold))
-            .foregroundStyle(.white.opacity(0.94))
-            .lineLimit(1)
-        }
-      }
-      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-      .padding(.trailing, 9)
-      .padding(.top, 10)
-    }
+    GeometryReader { geometry in
+      ZStack {
+        LinearGradient(colors: [palette.top, palette.bottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+        Circle().stroke(.white.opacity(0.16), lineWidth: 0.7)
+          .frame(width: geometry.size.width * 1.25, height: geometry.size.width * 1.25)
+          .offset(x: geometry.size.width * 0.18, y: geometry.size.height * 0.1)
+        Circle().stroke(.white.opacity(0.08), lineWidth: 0.7)
+          .padding(geometry.size.width * 0.22)
+        Text(String(title.first ?? "雨"))
+          .font(.system(size: geometry.size.width * 0.65, weight: .ultraLight, design: .serif))
+          .foregroundStyle(.white.opacity(0.3))
+          .offset(y: -geometry.size.height * 0.03)
+        VStack(alignment: .leading, spacing: 8) {
+          HStack {
+            Text("Y / D").font(.system(size: 8, design: .monospaced)).tracking(2)
+            Spacer()
+            Image(systemName: "sparkle").font(.system(size: 9))
+          }.foregroundStyle(.white.opacity(0.5))
+          Spacer()
+          Text(title).font(.system(size: max(11, geometry.size.width * 0.1), weight: .medium))
+            .foregroundStyle(.white.opacity(0.95)).lineLimit(2)
+          Rectangle().fill(.white.opacity(0.35)).frame(width: 22, height: 1)
+        }.padding(geometry.size.width * 0.12)
+      }.clipped()
+    }.accessibilityHidden(true)
   }
 }
 
@@ -98,7 +91,9 @@ struct CoverImage: View {
     }
     .task(id: "\(seriesKey)#\(libraryService.coverVersion)") {
       // 封面可能在扫描后几秒内生成，带重试
+      image = nil
       for _ in 0..<24 {
+        guard !Task.isCancelled else { return }
         if let loaded = UIImage(contentsOfFile: CoverStore.shared.coverURL(seriesKey: seriesKey).path) {
           image = loaded
           return

@@ -24,6 +24,7 @@ enum SelfTest {
   static func run(fixturePath: String, webdavURL: URL?, router: AppRouter, libraryService: LibraryService) async {
     let fixtureURL = URL(fileURLWithPath: fixturePath)
 
+    await shot("00-empty-shelf")
     // 1. 加入库并扫描
     _ = await libraryService.addFolderLibrary(url: fixtureURL)
     try? await Task.sleep(for: .seconds(2.0))
@@ -131,7 +132,8 @@ enum SelfTest {
       writeDone(marker: webdavMarker == "OK" ? "OK" : webdavMarker)
     }
 
-    // 6d. 天翼云盘协议连通性（真实服务器：取登录二维码，不扫码）
+    // 离线 CI 不请求真实云服务；正常诊断仍可显式运行协议探测。
+    if !ProcessInfo.processInfo.arguments.contains("-yuduOfflineSelfTest") {
     do {
       let probe = Cloud189Client()
       let qr = try await probe.beginQRLogin()
@@ -143,7 +145,22 @@ enum SelfTest {
         .data(using: .utf8)?.write(to: diagDir.appendingPathComponent("cloud189-diag.txt"))
     }
 
-    // 7. 统计 & 设置
+    }
+
+    // 7. 返回书架，验证阅读后续读卡、书库与全局导入面板。
+    router.bookshelfPath = []
+    try? await Task.sleep(for: .seconds(0.8))
+    await shot("12-continue-shelf")
+    router.tab = .library
+    try? await Task.sleep(for: .seconds(0.8))
+    await shot("13-library")
+    router.showImport = true
+    try? await Task.sleep(for: .seconds(0.8))
+    await shot("14-import")
+    router.showImport = false
+    try? await Task.sleep(for: .seconds(0.8))
+
+    // 8. 统计 & 设置
     router.tab = .stats
     try? await Task.sleep(for: .seconds(1.0))
     await shot("07-stats")
@@ -152,7 +169,11 @@ enum SelfTest {
     try? await Task.sleep(for: .seconds(1.0))
     await shot("08-settings")
 
+    UserDefaults.standard.set(AppearanceMode.light.rawValue, forKey: "appearanceMode")
     router.tab = .bookshelf
+    try? await Task.sleep(for: .seconds(0.8))
+    await shot("15-light-shelf")
+    UserDefaults.standard.set(AppearanceMode.dark.rawValue, forKey: "appearanceMode")
     writeDone(marker: "OK")
   }
 

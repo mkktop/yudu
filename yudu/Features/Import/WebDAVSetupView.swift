@@ -19,23 +19,8 @@ struct WebDAVSetupView: View {
     case browse
   }
 
-  private var currentURL: URL? {
-    guard var url = URL(string: address.trimmingCharacters(in: .whitespaces)) else { return nil }
-    if url.scheme == nil {
-      guard let withScheme = URL(string: "https://" + url.absoluteString) else { return nil }
-      url = withScheme
-    }
-    // 逐层下钻后，当前目录 = 最后进入的子项 URL
-    if let deepest = path.last {
-      return deepest.url
-    }
-    return url
-  }
-
-  private var client: WebDAVClient? {
-    guard let url = currentURL else { return nil }
-    return WebDAVClient(baseURL: url, username: username, password: password)
-  }
+  private var validatedAddress: URL? { WebDAVAddress.parse(address) }
+  private var currentURL: URL? { path.last?.url ?? validatedAddress }
 
   var body: some View {
     NavigationStack {
@@ -47,16 +32,13 @@ struct WebDAVSetupView: View {
               VStack(spacing: 10) {
                 Image(systemName: "cloud.fill")
                   .font(.system(size: 26))
-                  .foregroundStyle(.white)
+                  .foregroundStyle(YuduTheme.violet)
                   .frame(width: 62, height: 62)
                   .background(
-                    LinearGradient(
-                      colors: [.hex(0x6C7BD0), .hex(0x4A56A8)],
-                      startPoint: .topLeading, endPoint: .bottomTrailing
-                    ),
+                    YuduTheme.violet.opacity(0.1),
                     in: RoundedRectangle(cornerRadius: 16)
                   )
-                  .shadow(color: .hex(0x6C7BD0).opacity(0.4), radius: 8, y: 4)
+                  .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(YuduTheme.violet.opacity(0.4), lineWidth: 1) }
                 Text("连接 WebDAV 服务器")
                   .font(.headline)
                 Text("支持坚果云、NAS 等标准 WebDAV\n填写漫画所在目录的地址")
@@ -102,7 +84,7 @@ struct WebDAVSetupView: View {
                 HStack(spacing: 8) {
                   if busy {
                     ProgressView()
-                      .tint(.white)
+                      .tint(YuduTheme.background)
                   }
                   Text("连接服务器")
                     .font(.subheadline.weight(.semibold))
@@ -110,9 +92,8 @@ struct WebDAVSetupView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 4)
               }
-              .buttonStyle(.borderedProminent)
-              .tint(.cinnabar)
-              .disabled(busy || address.count < 8)
+              .buttonStyle(OrbitalButtonStyle())
+              .disabled(busy || validatedAddress == nil)
               .listRowInsets(EdgeInsets())
               .listRowBackground(Color.clear)
             }
@@ -125,19 +106,21 @@ struct WebDAVSetupView: View {
               }
             }
           }
+          .scrollContentBackground(.hidden)
         case .browse:
           List {
             Section {
               if !path.isEmpty {
                 Button {
                   path.removeLast()
-                  let target = path.last?.url ?? currentURL
-                  if let target {
-                    Task { await load(url: target) }
-                  }
+                  if let target = currentURL { Task { await load(url: target) } }
                 } label: {
                   Label("上一级", systemImage: "arrow.up")
                 }
+              }
+              if !busy && items.isEmpty {
+                Text("此目录为空，可返回上一级选择漫画文件夹。")
+                  .font(.subheadline).foregroundStyle(YuduTheme.muted)
               }
               ForEach(items.filter(\.isDirectory), id: \.url) { item in
                 Button {
@@ -146,7 +129,7 @@ struct WebDAVSetupView: View {
                 } label: {
                   HStack(spacing: 10) {
                     Image(systemName: "folder.fill")
-                      .foregroundStyle(.cinnabar.opacity(0.8))
+                      .foregroundStyle(YuduTheme.accent)
                     Text(item.name)
                       .foregroundStyle(.primary)
                     Spacer()
@@ -163,6 +146,8 @@ struct WebDAVSetupView: View {
               }
             }
           }
+          .scrollContentBackground(.hidden)
+          .disabled(busy)
           .overlay {
             if busy {
               ProgressView()
@@ -170,22 +155,23 @@ struct WebDAVSetupView: View {
           }
         }
       }
+      .yuduPage()
       .navigationTitle(phase == .form ? "连接 WebDAV" : (path.last?.name ?? "根目录"))
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
-          Button("取消") { dismiss() }
+          Button("取消") { dismiss() }.disabled(busy)
         }
         if phase == .browse {
           ToolbarItem(placement: .confirmationAction) {
-            Button("挂载此文件夹") {
+            Button("添加此文件夹") {
               Task { await primaryAction() }
             }
             .disabled(busy)
           }
         }
       }
-      .alert("挂载失败", isPresented: Binding(
+      .alert("无法读取或添加书库", isPresented: Binding(
         get: { phase == .browse && message != nil },
         set: { if !$0 { message = nil } }
       )) {
@@ -194,16 +180,17 @@ struct WebDAVSetupView: View {
         Text(message ?? "")
       }
     }
+    .interactiveDismissDisabled(busy)
   }
 
   private func load(url: URL) async {
     busy = true
     defer { busy = false }
     let probe = WebDAVClient(baseURL: url, username: username, password: password)
-    items = (try? await probe.list(url)) ?? []
-    if items.isEmpty {
-      message = "目录为空或读取失败"
-    }
+    message = nil
+    items = []
+    do { items = try await probe.list(url) }
+    catch { message = error.localizedDescription }
   }
 
   private func primaryAction() async {
@@ -212,6 +199,7 @@ struct WebDAVSetupView: View {
       return
     }
     busy = true
+    message = nil
     defer { busy = false }
 
     if phase == .form {
@@ -229,9 +217,7 @@ struct WebDAVSetupView: View {
         baseURL: url, username: username.isEmpty ? nil : username, password: password.isEmpty ? nil : password
       )
       switch result {
-      case .success(let library):
-        message = "已挂载「\(library.name)」"
-        try? await Task.sleep(for: .seconds(0.6))
+      case .success:
         dismiss()
       case .failure(let failure):
         message = failure.message

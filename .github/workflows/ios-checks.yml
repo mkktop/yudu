@@ -1,0 +1,48 @@
+name: iOS build and reading checks
+on:
+  push:
+    branches: [main, 'redesign/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ios-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: SwiftData and WebDAV regression checks
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library \
+            yudu/Model/Entities.swift yudu/Model/Queries.swift \
+            yudu/Core/WebDAV/WebDAVAddress.swift tests/QueriesChecks.swift \
+            -o "$RUNNER_TEMP/yudu-checks"
+          "$RUNNER_TEMP/yudu-checks"
+      - name: Build iOS app without signing
+        run: |
+          set -o pipefail
+          xcodebuild -project yudu.xcodeproj -scheme yudu \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 SUPPORTED_PLATFORMS=iphonesimulator build
+      - name: Run offline simulator smoke test
+        run: bash tools/simulator-smoke.sh
+      - name: Build Release without debug self-test hooks
+        run: |
+          set -o pipefail
+          xcodebuild -project yudu.xcodeproj -scheme yudu \
+            -configuration Release -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 SUPPORTED_PLATFORMS=iphonesimulator build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulator-screenshots
+          path: build/simulator-shots
+          if-no-files-found: warn

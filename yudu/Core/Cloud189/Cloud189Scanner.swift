@@ -162,14 +162,19 @@ nonisolated final class Cloud189FolderPageSource: PageSource, @unchecked Sendabl
     return data
   }
 
-  func prefetchAll() async {
+  func prefetchAll() async -> Bool {
     let keys = cacheURLs
+    var complete = true
     for (index, image) in images.enumerated() {
+      guard !Task.isCancelled else { return false }
       if WebDAVCache.shared.imageURL(for: keys[index]) != nil { continue }
       if let data = try? await client.fetchData(fileId: image.id, familyId: familyId) {
+        guard !Task.isCancelled else { return false }
         WebDAVCache.shared.storeImage(data, for: keys[index], seriesKey: seriesKey)
-      }
+        if WebDAVCache.shared.imageURL(for: keys[index]) == nil { complete = false }
+      } else { complete = false }
     }
+    return complete
   }
 }
 
