@@ -63,6 +63,7 @@ final class ChapterEntity {
   var modifiedAt: Date = Date.distantPast
 
   var series: SeriesEntity?
+  @Relationship(deleteRule: .cascade, inverse: \ProgressEntity.chapter)
   var progress: ProgressEntity?
 
   init(path: String, title: String) {
@@ -84,24 +85,6 @@ final class ProgressEntity {
     self.page = page
     self.completed = completed
     self.updatedAt = updatedAt
-  }
-}
-
-/// 按系列记忆的阅读偏好（字段为 nil 时用全局默认）
-@Model
-final class SeriesPrefsEntity {
-  @Attribute(.unique) var seriesKey: String
-  /// "single" | "webtoon"
-  var mode: String?
-  var rtl: Bool?
-  /// "width" | "height"
-  var fit: String?
-
-  init(seriesKey: String, mode: String? = nil, rtl: Bool? = nil, fit: String? = nil) {
-    self.seriesKey = seriesKey
-    self.mode = mode
-    self.rtl = rtl
-    self.fit = fit
   }
 }
 

@@ -22,14 +22,20 @@ jobs:
             yudu/Core/WebDAV/WebDAVAddress.swift tests/QueriesChecks.swift \
             -o "$RUNNER_TEMP/yudu-checks"
           "$RUNNER_TEMP/yudu-checks"
+      - name: ZIP and filename parser regression checks
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library \
+            yudu/Core/MediaSniff.swift yudu/Core/FilenameParser.swift \
+            yudu/Core/ZipFile.swift tests/ZipChecks.swift \
+            -o "$RUNNER_TEMP/yudu-zip-checks"
+          "$RUNNER_TEMP/yudu-zip-checks"
       - name: Build iOS app without signing
         run: |
           set -o pipefail
           xcodebuild -project yudu.xcodeproj -scheme yudu \
             -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO \
-            IPHONEOS_DEPLOYMENT_TARGET=18.0 SUPPORTED_PLATFORMS=iphonesimulator build
+            -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO build
       - name: Run offline simulator smoke test
         run: bash tools/simulator-smoke.sh
       - name: Build Release without debug self-test hooks
@@ -38,8 +44,7 @@ jobs:
           xcodebuild -project yudu.xcodeproj -scheme yudu \
             -configuration Release -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO \
-            IPHONEOS_DEPLOYMENT_TARGET=18.0 SUPPORTED_PLATFORMS=iphonesimulator build
+            -derivedDataPath build/ci CODE_SIGNING_ALLOWED=NO build
       - uses: actions/upload-artifact@v4
         if: always()
         with:

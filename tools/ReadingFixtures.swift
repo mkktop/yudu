@@ -2,6 +2,7 @@
 // 原创几何封面与测试页，仅供模拟器 smoke test，不包含真实漫画或账号。
 import AppKit
 import Foundation
+import PDFKit
 
 let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let titles = ["月海来信", "星际漫游", "雨夜档案", "时间之外", "失重日记", "银河回声"]
@@ -67,4 +68,31 @@ for (series, title) in titles.enumerated() {
     }
   }
 }
-print("Created six local reading fixtures")
+
+// ZIP / CBZ 章节：验证自研 zip 解析器与单页阅读
+func makeCBZ(named name: String, into seriesDir: URL, pages: [String]) throws {
+  let sources = pages.compactMap { rendered[$0] }
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+  process.arguments = ["-q", "-X", "-j", seriesDir.appendingPathComponent(name).path] + sources.map(\.path)
+  try process.run()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0 else {
+    throw NSError(domain: "ReadingFixtures.zip", code: Int(process.terminationStatus))
+  }
+}
+
+let zipSeries = root.appendingPathComponent("轨道快递", isDirectory: true)
+try FileManager.default.createDirectory(at: zipSeries, withIntermediateDirectories: true)
+try makeCBZ(named: "第1卷 第01话.cbz", into: zipSeries, pages: ["page-1", "page-2", "page-3"])
+try makeCBZ(named: "第1卷 第02话.cbz", into: zipSeries, pages: ["page-2", "page-3", "page-4"])
+
+// PDF 章节：验证 PDF 连续阅读
+let pdf = PDFDocument()
+for (index, key) in ["page-1", "page-2", "page-3"].enumerated() {
+  if let url = rendered[key], let image = NSImage(contentsOf: url), let pdfPage = PDFPage(image: image) {
+    pdf.insert(pdfPage, at: index)
+  }
+}
+_ = pdf.write(to: root.appendingPathComponent("深海纪行.pdf"))
+print("Created local reading fixtures (6 image series + 1 zip series + 1 pdf)")

@@ -90,9 +90,8 @@ struct CoverImage: View {
       }
     }
     .task(id: "\(seriesKey)#\(libraryService.coverVersion)") {
-      // 封面可能在扫描后几秒内生成，带重试
-      image = nil
-      for _ in 0..<24 {
+      // 封面可能在扫描后几秒内生成，带重试；coverVersion 变化时不重置旧图，避免整墙闪烁。
+      for _ in 0..<8 {
         guard !Task.isCancelled else { return }
         if let loaded = UIImage(contentsOfFile: CoverStore.shared.coverURL(seriesKey: seriesKey).path) {
           image = loaded

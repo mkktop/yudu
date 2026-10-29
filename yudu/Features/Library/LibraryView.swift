@@ -25,13 +25,18 @@ struct LibraryView: View {
             VStack(alignment: .leading, spacing: 14) {
               HStack {
                 SectionHeading(title: "已添加的来源", eyebrow: "MY SOURCES")
-                Button {
-                  Task { await libraryService.rescanAll() }
+                Menu {
+                  Button("增量扫描", systemImage: "bolt.horizontal.circle") {
+                    Task { await libraryService.rescanAll() }
+                  }
+                  Button("完整扫描（较慢）", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await libraryService.rescanAll(mode: .full) }
+                  }
                 } label: {
                   Image(systemName: "arrow.triangle.2.circlepath").frame(width: 44, height: 44)
                 }
                 .disabled(libraryService.isScanning)
-                .accessibilityLabel("重新扫描全部书库")
+                .accessibilityLabel("扫描全部书库")
               }
               ForEach(libraries) { sourceCard($0) }
             }
@@ -39,8 +44,13 @@ struct LibraryView: View {
           if libraryService.isScanning {
             HStack(spacing: 10) {
               ProgressView().tint(YuduTheme.accent)
-              Text("正在扫描，请稍候…").font(.subheadline).foregroundStyle(YuduTheme.muted)
+              Text(libraryService.scanProgress.map { "扫描中：\($0.title)（\($0.current + 1)/\($0.total)）" } ?? "正在扫描，请稍候…")
+                .font(.subheadline).foregroundStyle(YuduTheme.muted)
             }.padding(16).frame(maxWidth: .infinity, alignment: .leading).yuduPanel()
+          } else if let summary = libraryService.lastScanSummary {
+            Label(summary, systemImage: "checkmark.circle")
+              .font(.caption).foregroundStyle(YuduTheme.muted)
+              .padding(.horizontal, 2)
           }
           if !libraryService.lastErrors.isEmpty {
             NoticeView(title: "扫描中有 \(libraryService.lastErrors.count) 条提示", message: libraryService.lastErrors.prefix(5).joined(separator: "\n"), icon: "exclamationmark.triangle", color: YuduTheme.warning)
@@ -48,7 +58,7 @@ struct LibraryView: View {
           VStack(alignment: .leading, spacing: 10) {
             Label("本地与云端，一个书架", systemImage: "point.3.connected.trianglepath.dotted")
               .font(.subheadline.weight(.medium)).foregroundStyle(YuduTheme.text)
-            Text("文件夹原地读取；导入文件会保留本机副本。云端漫画可在详情页离线缓存，缓存容量在设置中管理。")
+            Text("文件夹原地读取；导入文件会保留本机副本。云端漫画可在详情页离线缓存，缓存容量在设置中管理。增量扫描只复查远端有变化的目录，需要重新识别全部内容时用「完整扫描」。")
               .font(.caption).foregroundStyle(YuduTheme.muted).lineSpacing(4)
           }.padding(18).yuduPanel()
         }
@@ -57,7 +67,6 @@ struct LibraryView: View {
       .yuduPage()
       .navigationTitle("书库")
       .navigationBarTitleDisplayMode(.inline)
-      .refreshable { await libraryService.rescanAll() }
       .confirmationDialog(
         "移除「\(removing?.name ?? "")」？",
         isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
@@ -100,8 +109,12 @@ struct LibraryView: View {
         }
         Spacer(minLength: 0)
         Menu {
-          Button("重新扫描", systemImage: "arrow.triangle.2.circlepath") {
+          Button("增量扫描", systemImage: "bolt.horizontal.circle") {
             Task { await libraryService.rescan(library) }
+          }
+          .disabled(libraryService.isScanning)
+          Button("完整扫描", systemImage: "arrow.triangle.2.circlepath") {
+            Task { await libraryService.rescan(library, mode: .full) }
           }
           .disabled(libraryService.isScanning)
           Button("移除书库", systemImage: "trash", role: .destructive) { removing = library }

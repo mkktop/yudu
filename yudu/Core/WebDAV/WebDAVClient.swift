@@ -1,5 +1,4 @@
 import Foundation
-import UIKit
 
 // MARK: - WebDAV 客户端（PROPFIND / GET / HEAD，Basic 认证）
 
@@ -48,12 +47,23 @@ nonisolated final class WebDAVClient: @unchecked Sendable {
     var req = URLRequest(url: url)
     req.httpMethod = method
     req.timeoutInterval = 30
-    if let authHeader { req.setValue(authHeader, forHTTPHeaderField: "Authorization") }
+    // 只在同源请求上附带 Basic 认证；服务器返回的 href 不可信。
+    if let authHeader, WebDAVOrigin.isSameOrigin(url, baseURL) {
+      req.setValue(authHeader, forHTTPHeaderField: "Authorization")
+    }
     if let depth { req.setValue(depth, forHTTPHeaderField: "Depth") }
     if let body {
       req.httpBody = body
       req.setValue("application/xml", forHTTPHeaderField: "Content-Type")
     }
+    return req
+  }
+
+  /// 供 Range 直读使用：带认证且限制在同源的 GET 请求。
+  func rangeRequest(_ url: URL, offset: Int, length: Int) -> URLRequest? {
+    guard offset >= 0, length > 0, WebDAVOrigin.isSameOrigin(url, baseURL) else { return nil }
+    var req = makeRequest(url, method: "GET")
+    req.setValue("bytes=\(offset)-\(offset + length - 1)", forHTTPHeaderField: "Range")
     return req
   }
 
@@ -63,6 +73,9 @@ nonisolated final class WebDAVClient: @unchecked Sendable {
 
   /// 列目录（Depth 1，含直接子项；不含请求目录自身）
   func list(_ url: URL) async throws -> [WebDAVItem] {
+    guard WebDAVOrigin.isSameOrigin(url, baseURL) else {
+      throw WebDAVError.unreachable("目录地址不在同一服务器")
+    }
     let req = makeRequest(url, method: "PROPFIND", depth: "1", body: Self.propfindBody)
     let (data, response) = try await URLSession.shared.data(for: req)
     guard let http = response as? HTTPURLResponse else { throw WebDAVError.badStatus(-1) }
@@ -80,6 +93,7 @@ nonisolated final class WebDAVClient: @unchecked Sendable {
 
   /// 文件大小（挂载前的体积检查用）
   func contentLength(_ url: URL) async -> Int64? {
+    guard WebDAVOrigin.isSameOrigin(url, baseURL) else { return nil }
     var req = makeRequest(url, method: "HEAD")
     req.timeoutInterval = 10
     guard let (_, response) = try? await URLSession.shared.data(for: req),
@@ -91,6 +105,9 @@ nonisolated final class WebDAVClient: @unchecked Sendable {
 
   /// 下载到指定路径（临时文件落位，覆盖旧文件）
   func download(_ url: URL, to dest: URL) async throws {
+    guard WebDAVOrigin.isSameOrigin(url, baseURL) else {
+      throw WebDAVError.unreachable("文件地址不在同一服务器")
+    }
     let req = makeRequest(url, method: "GET")
     let (tmpURL, response) = try await URLSession.shared.download(for: req)
     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
@@ -102,6 +119,9 @@ nonisolated final class WebDAVClient: @unchecked Sendable {
 
   /// 拉一段数据（单张图片）
   func get(_ url: URL) async throws -> Data {
+    guard WebDAVOrigin.isSameOrigin(url, baseURL) else {
+      throw WebDAVError.unreachable("文件地址不在同一服务器")
+    }
     let req = makeRequest(url, method: "GET")
     let (data, response) = try await URLSession.shared.data(for: req)
     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
@@ -110,12 +130,58 @@ nonisolated final class WebDAVClient: @unchecked Sendable {
     return data
   }
 
+  /// 无盘模式取整包到内存：先看 Content-Length，未知时落临时文件再按大小决定，
+  /// 避免 data(for:) 直接把几 GB 文件读进内存。
+  func fetchDataLimited(_ url: URL, limit: Int) async -> Data? {
+    guard limit > 0, WebDAVOrigin.isSameOrigin(url, baseURL) else { return nil }
+    if let length = await contentLength(url), length > Int64(limit) { return nil }
+    do {
+      let (tmp, response) = try await URLSession.shared.download(for: makeRequest(url, method: "GET"))
+      guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+      let size = (try? tmp.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+      guard size > 0, size <= limit else {
+        try? FileManager.default.removeItem(at: tmp)
+        return nil
+      }
+      let data = try Data(contentsOf: tmp)
+      try? FileManager.default.removeItem(at: tmp)
+      return data
+    } catch {
+      return nil
+    }
+  }
+
   /// 同步取数据（页源在后台解码线程里用）
   func getSync(_ url: URL) -> Data? {
     let semaphore = DispatchSemaphore(value: 0)
     nonisolated(unsafe) var result: Data?
     Task.detached {
       result = try? await self.get(url)
+      semaphore.signal()
+    }
+    semaphore.wait()
+    return result
+  }
+
+  /// 只取开头一段（读图片尺寸用）
+  func getPrefix(_ url: URL, length: Int) async -> Data? {
+    guard length > 0, let req = rangeRequest(url, offset: 0, length: length) else { return nil }
+    do {
+      let (data, response) = try await URLSession.shared.data(for: req)
+      guard let http = response as? HTTPURLResponse,
+            http.statusCode == 206 || http.statusCode == 200 else { return nil }
+      return data.count > length ? Data(data.prefix(length)) : data
+    } catch {
+      return nil
+    }
+  }
+
+  /// 后台加载线程的同步取图头（页源用）
+  func getPrefixSync(_ url: URL, length: Int) -> Data? {
+    let semaphore = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var result: Data?
+    Task.detached {
+      result = await self.getPrefix(url, length: length)
       semaphore.signal()
     }
     semaphore.wait()
@@ -195,6 +261,7 @@ nonisolated final class MultistatusParser: NSObject, XMLParserDelegate {
     case "response":
       if let href,
          let url = Self.resolve(href: href, base: base),
+         WebDAVOrigin.isSameOrigin(url, base),
          Self.normalizedPath(url.path) != requestPath {
         items.append(
           WebDAVItem(

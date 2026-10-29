@@ -92,6 +92,8 @@ private struct WebtoonPageItem: View {
   let width: CGFloat
 
   @State private var image: UIImage?
+  @State private var failed = false
+  @State private var retryToken = 0
 
   private var aspect: CGFloat {
     if let dims = vm.dims[index], dims.width > 0 {
@@ -108,6 +110,19 @@ private struct WebtoonPageItem: View {
         Image(uiImage: image)
           .resizable()
           .scaledToFill()
+      } else if failed {
+        VStack(spacing: 10) {
+          Image(systemName: "exclamationmark.triangle")
+            .font(.title3)
+          Text("这一页加载失败")
+            .font(.caption)
+          Button("重试") { retryToken += 1 }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(.white.opacity(0.12), in: Capsule())
+        }
+        .foregroundStyle(.white.opacity(0.85))
       } else {
         ProgressView()
           .tint(.white.opacity(0.5))
@@ -115,11 +130,22 @@ private struct WebtoonPageItem: View {
     }
     .frame(width: width, height: height)
     .clipped()
-    .task(id: "\(vm.sourceID)#\(index)") {
+    .task(id: "\(vm.sourceID)#\(index)#\(retryToken)") {
+      failed = false
       guard vm.pageCount > 0, let source = vm.source else { return }
+      // 懒加载尺寸：只有滚到附近的页才解压/下载，避免打开一章就处理整章。
+      vm.requestDims(for: index)
       let sid = vm.sourceID
-      image = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 2048) {
+      let loaded = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 2048) {
         source.pageImage(at: index, maxPixel: 2048)
+      }
+      guard !Task.isCancelled else { return }
+      if let loaded {
+        image = loaded
+        // 解码完成的真实尺寸回填给阅读器（条漫布局 + 持久化），不再额外探测
+        vm.recordPageSize(index: index, size: loaded.size)
+      } else {
+        failed = true
       }
     }
     .background(

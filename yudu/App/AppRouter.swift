@@ -23,9 +23,13 @@ enum BookshelfRoute: Hashable {
   case series(SeriesEntity)
   /// token 保证每次进入阅读器都是新的视图身份（避免快速退出重进时复用旧状态）
   case reader(series: SeriesEntity, startChapter: ChapterEntity?, token: UUID)
+}
 
-  static func reader(series: SeriesEntity, startChapter: ChapterEntity?) -> BookshelfRoute {
-    .reader(series: series, startChapter: startChapter, token: UUID())
+extension AppRouter {
+  /// 进阅读器统一走这里：在点击时生成 token，而不是在 body 求值时生成，
+  /// 否则每次刷新都会改变 NavigationLink 的值。
+  func openReader(series: SeriesEntity, startChapter: ChapterEntity?) {
+    bookshelfPath.append(.reader(series: series, startChapter: startChapter, token: UUID()))
   }
 }
 

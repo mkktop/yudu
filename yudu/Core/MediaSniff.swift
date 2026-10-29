@@ -1,6 +1,6 @@
 import Foundation
 
-enum MediaSniff {
+nonisolated enum MediaSniff {
 
   static let imageExtensions: Set<String> = [
     "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif", "apng", "tif", "tiff",
@@ -50,6 +50,6 @@ enum MediaSniff {
 }
 
 /// 数字感知的自然排序（第2话 < 第10话）
-func naturalCompare(_ a: String, _ b: String) -> Bool {
+nonisolated func naturalCompare(_ a: String, _ b: String) -> Bool {
   a.compare(b, options: .numeric, locale: Locale(identifier: "zh_CN")) == .orderedAscending
 }

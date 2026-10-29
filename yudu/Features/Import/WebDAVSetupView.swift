@@ -61,6 +61,11 @@ struct WebDAVSetupView: View {
                   .autocorrectionDisabled()
                   .textInputAutocapitalization(.never)
               }
+              if let url = validatedAddress, url.scheme?.lowercased() == "http" {
+                Label("HTTP 明文传输不加密，建议只在可信局域网使用", systemImage: "exclamationmark.triangle")
+                  .font(.caption)
+                  .foregroundStyle(.orange)
+              }
               HStack(spacing: 10) {
                 Image(systemName: "person")
                   .foregroundStyle(.secondary)

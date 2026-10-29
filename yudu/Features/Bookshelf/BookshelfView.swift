@@ -61,9 +61,14 @@ struct BookshelfView: View {
           if libraryService.isScanning {
             HStack(spacing: 10) {
               ProgressView().tint(YuduTheme.accent)
-              Text("正在扫描书库与生成封面…").font(.caption)
+              Text(libraryService.scanProgress.map { "\($0.title)（\($0.current + 1)/\($0.total)）" } ?? "正在扫描书库与生成封面…")
+                .font(.caption)
             }
             .foregroundStyle(YuduTheme.muted)
+          } else if let summary = libraryService.lastScanSummary {
+            Text(summary)
+              .font(.caption2)
+              .foregroundStyle(YuduTheme.muted)
           }
           if allSeries.isEmpty {
             emptyState
@@ -83,7 +88,19 @@ struct BookshelfView: View {
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .principal) { YuduWordmark().fixedSize() }
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+          Menu {
+            Button("增量扫描", systemImage: "bolt.horizontal.circle") {
+              Task { await libraryService.rescanAll() }
+            }
+            Button("完整扫描（较慢）", systemImage: "arrow.triangle.2.circlepath") {
+              Task { await libraryService.rescanAll(mode: .full) }
+            }
+          } label: {
+            Image(systemName: "arrow.triangle.2.circlepath").frame(width: 44, height: 44)
+          }
+          .disabled(libraryService.isScanning)
+          .accessibilityLabel("扫描书库")
           Button { router.showImport = true } label: {
             Image(systemName: "plus").font(.body.weight(.medium)).frame(width: 44, height: 44)
           }
@@ -98,7 +115,6 @@ struct BookshelfView: View {
           ReaderView(series: series, startChapter: chapter, token: token)
         }
       }
-      .refreshable { await libraryService.rescanAll() }
       .onChange(of: libraries.map(\.key)) { _, keys in
         if let sourceKey, !keys.contains(sourceKey) { self.sourceKey = nil }
       }
@@ -130,7 +146,9 @@ struct BookshelfView: View {
     if let first = items.first {
       VStack(alignment: .leading, spacing: 14) {
         SectionHeading(title: "接着上次的故事", eyebrow: "CONTINUE READING")
-        NavigationLink(value: BookshelfRoute.reader(series: first.series, startChapter: first.chapter)) {
+        Button {
+          router.openReader(series: first.series, startChapter: first.chapter)
+        } label: {
           ContinueCard(item: first, featured: true)
         }
         .buttonStyle(.plain)
@@ -138,7 +156,9 @@ struct BookshelfView: View {
           ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
               ForEach(Array(items.dropFirst())) { item in
-                NavigationLink(value: BookshelfRoute.reader(series: item.series, startChapter: item.chapter)) {
+                Button {
+                  router.openReader(series: item.series, startChapter: item.chapter)
+                } label: {
                   ContinueCard(item: item).frame(width: 272)
                 }
                 .buttonStyle(.plain)

@@ -2,11 +2,13 @@ import SwiftUI
 import SwiftData
 
 struct RootView: View {
+  var storageNotice: String? = nil
   @Environment(AppRouter.self) private var router
   @Environment(LibraryService.self) private var libraryService
   @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.dark.rawValue
 
-  @State private var didLaunchRescan = false
+  @State private var didStart = false
+  @State private var showStorageNotice = false
 
   private var appearance: AppearanceMode {
     AppearanceMode(rawValue: appearanceRaw) ?? .system
@@ -33,10 +35,15 @@ struct RootView: View {
     .sheet(isPresented: Binding(get: { router.showImport }, set: { router.showImport = $0 })) {
       ImportSheet()
     }
+    .alert("存储异常", isPresented: $showStorageNotice) {
+      Button("好", role: .cancel) {}
+    } message: {
+      Text(storageNotice ?? "")
+    }
     .task {
-      guard !didLaunchRescan else { return }
-      didLaunchRescan = true
-      await libraryService.rescanOnLaunch()
+      guard !didStart else { return }
+      didStart = true
+      if storageNotice != nil { showStorageNotice = true }
       #if DEBUG
       SelfTest.maybeRun(router: router, libraryService: libraryService)
       #endif

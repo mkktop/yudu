@@ -1,7 +1,7 @@
 import Foundation
 
 /// 从章节文件名解析卷号 / 话号（移植桌面版 scanner/parse.ts 的规则）
-enum FilenameParser {
+nonisolated enum FilenameParser {
 
   struct Parsed {
     var volume: String?

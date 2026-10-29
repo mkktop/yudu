@@ -5,6 +5,7 @@ struct StatsView: View {
   @Query private var logs: [ReadingLogEntity]
   @AppStorage("dailyReadingGoal") private var dailyGoal = 30
   @State private var range: HeatRange = .halfYear
+  @State private var selectedDay = Queries.dayKey(.now)
 
   enum HeatRange: String, CaseIterable, Identifiable {
     case halfYear = "近半年", year = "近一年"
@@ -102,37 +103,98 @@ struct StatsView: View {
   }
 
   private var heatmap: some View {
-    VStack(alignment: .leading, spacing: 18) {
+    let weeks = Self.weekBuckets(summary.days, weeks: range.weeks)
+    let selected = selectedInfo
+    return VStack(alignment: .leading, spacing: 16) {
       SectionHeading(title: "阅读轨迹", eyebrow: "YOUR CONSTELLATION")
       Picker("热力图时间范围", selection: $range) {
         ForEach(HeatRange.allCases) { Text($0.rawValue).tag($0) }
       }.pickerStyle(.segmented)
+      selectedDayCard(selected)
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(alignment: .top, spacing: 4) {
-          ForEach(Array(Self.weekBuckets(summary.days, weeks: range.weeks).enumerated()), id: \.offset) { _, week in
+          ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
             VStack(spacing: 4) {
               ForEach(0..<7, id: \.self) { day in
                 if let cell = week.first(where: { $0.weekday == day }) {
-                  RoundedRectangle(cornerRadius: 3).fill(Self.levelColor(cell.level))
-                    .frame(width: 12, height: 12)
-                    .accessibilityLabel("\(cell.day)，阅读 \(cell.pages) 页")
-                } else { Color.clear.frame(width: 12, height: 12).accessibilityHidden(true) }
+                  Button {
+                    selectedDay = cell.day
+                  } label: {
+                    RoundedRectangle(cornerRadius: 4)
+                      .fill(Self.levelColor(cell.level))
+                      .frame(width: 18, height: 18)
+                      .overlay {
+                        if selectedDay == cell.day {
+                          RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(YuduTheme.text.opacity(0.9), lineWidth: 1.5)
+                        }
+                      }
+                  }
+                  .buttonStyle(.plain)
+                  .accessibilityLabel(cell.pages > 0
+                    ? "\(cell.day)，阅读 \(cell.pages) 页"
+                    : "\(cell.day)，没有阅读")
+                  .accessibilityAddTraits(selectedDay == cell.day ? .isSelected : [])
+                } else {
+                  Color.clear.frame(width: 18, height: 18).accessibilityHidden(true)
+                }
               }
             }
           }
-        }.padding(2)
+        }
+        .padding(2)
       }
       .defaultScrollAnchor(.trailing)
-      HStack(spacing: 5) {
-        Text("每天的阅读，汇成星图").font(.caption2).foregroundStyle(YuduTheme.muted)
+      HStack(spacing: 6) {
+        Text("点格子查看当天页数").font(.caption2).foregroundStyle(YuduTheme.muted)
         Spacer(minLength: 0)
         Text("少").font(.system(size: 9)).foregroundStyle(YuduTheme.muted)
         ForEach(0...4, id: \.self) { level in
-          RoundedRectangle(cornerRadius: 2).fill(Self.levelColor(level)).frame(width: 9, height: 9)
+          RoundedRectangle(cornerRadius: 2).fill(Self.levelColor(level)).frame(width: 11, height: 11)
         }
         Text("多").font(.system(size: 9)).foregroundStyle(YuduTheme.muted)
       }
-    }.padding(18).yuduPanel()
+    }
+    .padding(18)
+    .yuduPanel()
+    .sensoryFeedback(.selection, trigger: selectedDay)
+    .onChange(of: range) { _, _ in selectedDay = Queries.dayKey(.now) }
+  }
+
+  /// 当前选中日期的展示信息。
+  private var selectedInfo: (title: String, pages: Int) {
+    let pages = summary.days[selectedDay] ?? 0
+    let title: String
+    if let parts = Self.dayParts(selectedDay) {
+      if selectedDay == Queries.dayKey(.now) {
+        title = "今天 · \(parts.month)月\(parts.day)日"
+      } else if parts.year == Calendar.current.component(.year, from: .now) {
+        title = "\(parts.month)月\(parts.day)日 \(parts.weekday)"
+      } else {
+        title = "\(parts.year)年\(parts.month)月\(parts.day)日"
+      }
+    } else {
+      title = selectedDay
+    }
+    return (title, pages)
+  }
+
+  private func selectedDayCard(_ info: (title: String, pages: Int)) -> some View {
+    HStack(spacing: 10) {
+      RoundedRectangle(cornerRadius: 4)
+        .fill(Self.levelColor(Self.level(info.pages)))
+        .frame(width: 14, height: 14)
+      Text(info.title).font(.subheadline.weight(.medium))
+      Spacer(minLength: 8)
+      Text(info.pages > 0 ? "\(info.pages) 页" : "没有阅读")
+        .font(.subheadline.weight(.semibold).monospacedDigit())
+        .foregroundStyle(info.pages > 0 ? YuduTheme.accent : YuduTheme.muted)
+    }
+    .padding(.horizontal, 12)
+    .frame(height: 42)
+    .background(YuduTheme.elevated.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+    .accessibilityElement(children: .combine)
+    .animation(.easeOut(duration: 0.15), value: info.pages)
   }
 
   struct HeatCell: Hashable {
@@ -159,6 +221,18 @@ struct StatsView: View {
     }
     if !current.isEmpty { weeks.append(current) }
     return weeks
+  }
+
+  static func dayParts(_ key: String) -> (year: Int, month: Int, day: Int, weekday: String)? {
+    let parts = key.split(separator: "-")
+    guard parts.count == 3,
+          let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]),
+          let date = Calendar.current.date(from: DateComponents(year: year, month: month, day: day))
+    else { return nil }
+    let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+    let index = Calendar.current.component(.weekday, from: date) - 1
+    guard names.indices.contains(index) else { return nil }
+    return (year, month, day, names[index])
   }
 
   static func level(_ pages: Int) -> Int {

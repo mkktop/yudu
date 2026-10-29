@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import CryptoKit
+import os
 
 /// 页图内存缓存：解码最长边 ≤ maxPixel；命中直接返回，未命中经页源解码
 nonisolated final class PageCache: @unchecked Sendable {
@@ -28,23 +29,33 @@ nonisolated final class PageCache: @unchecked Sendable {
     cache.object(forKey: Self.key(sourceID, index, maxPixel: maxPixel))
   }
 
-  /// 异步取：缓存 → 去重解码 → 缓存
-  func image(sourceID: String, index: Int, maxPixel: Int, loader: @escaping @Sendable () -> UIImage?) async -> UIImage? {
+  /// 异步取：缓存 → 去重解码 → 缓存。
+  /// 加载本身跑在专用有界线程池，页源里的同步网络桥接不会阻塞 Swift 并发池。
+  func image(
+    sourceID: String, index: Int, maxPixel: Int,
+    priority: TaskPriority = .userInitiated,
+    loader: @escaping @Sendable () -> UIImage?
+  ) async -> UIImage? {
     if let hit = cached(sourceID: sourceID, index: index, maxPixel: maxPixel) {
+      Perf.signposter.emitEvent("page-cache-hit")
       return hit
     }
+    let interval = Perf.signposter.beginInterval("page-load")
+    defer { Perf.signposter.endInterval("page-load", interval) }
     let task: Task<UIImage?, Never> = lock.withLock {
       if let existing = inflight[String(Self.key(sourceID, index, maxPixel: maxPixel))] {
         return existing
       }
-      let task = Task.detached(priority: .userInitiated) { [loader] in
-        loader()
+      let task = Task.detached(priority: priority) { [loader] in
+        await PageLoadExecutor.shared.run(priority: priority) {
+          autoreleasepool { loader() }
+        }
       }
       inflight[String(Self.key(sourceID, index, maxPixel: maxPixel))] = task
       return task
     }
     let image = await task.value
-    lock.withLock {
+    _ = lock.withLock {
       inflight.removeValue(forKey: String(Self.key(sourceID, index, maxPixel: maxPixel)))
     }
     if let image {
@@ -85,6 +96,17 @@ nonisolated final class CoverStore: @unchecked Sendable {
     FileManager.default.fileExists(atPath: coverURL(seriesKey: seriesKey).path)
   }
 
+  /// 封面文件比源章节旧则需要重画。
+  func isFresh(seriesKey: String, sourceModifiedAt: Date) -> Bool {
+    let target = coverURL(seriesKey: seriesKey)
+    guard FileManager.default.fileExists(atPath: target.path) else { return false }
+    guard sourceModifiedAt > .distantPast else { return true }
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: target.path),
+          let coverDate = attrs[.modificationDate] as? Date
+    else { return true }
+    return coverDate >= sourceModifiedAt
+  }
+
   /// 从一章第一页生成封面；成功返回 true
   func generate(
     seriesKey: String,
@@ -92,13 +114,48 @@ nonisolated final class CoverStore: @unchecked Sendable {
     kind: String,
     libraryRoot: URL?,
     webdavClient: WebDAVClient? = nil,
-    cloud189Client: Cloud189Client? = nil
+    cloud189Client: Cloud189Client? = nil,
+    contentVersion: String? = nil
   ) async -> Bool {
     let target = coverURL(seriesKey: seriesKey)
-    let sourceID = "cover:" + hashKey(seriesKey)
+    let sourceID = "cover:" + hashKey(seriesKey) + ":" + (contentVersion ?? "")
+
+    func save(_ image: UIImage?) -> Bool {
+      guard let image, let jpeg = image.jpegData(compressionQuality: 0.82) else { return false }
+      do {
+        try jpeg.write(to: target, options: .atomic)
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    // WebDAV / 天翼 zip：只读中央目录和第一页，不下载整包。
+    if kind == "zip", let webdavClient, let url = URL(string: chapterPath) {
+      let fetcher = RangeFetcher(source: .webdav(webdavClient, url))
+      if let remote = RemoteZipPageSource(fetcher: fetcher) {
+        let image = await PageCache.shared.image(sourceID: sourceID, index: 0, maxPixel: 600) {
+          remote.pageImage(at: 0, maxPixel: 600)
+        }
+        if save(image) { return true }
+      }
+    }
+    if kind == "zip", let cloud189Client, let parsed = Cloud189Path.parse(chapterPath) {
+      let fetcher = RangeFetcher(
+        source: .cloud189(cloud189Client, fileId: parsed.fileId, familyId: parsed.familyId)
+      )
+      if let remote = RemoteZipPageSource(fetcher: fetcher) {
+        let image = await PageCache.shared.image(sourceID: sourceID, index: 0, maxPixel: 600) {
+          remote.pageImage(at: 0, maxPixel: 600)
+        }
+        if save(image) { return true }
+      }
+    }
+
     guard let opened = await PageSourceFactory.open(
       chapterPath: chapterPath, kind: kind, libraryRoot: libraryRoot,
-      seriesKey: seriesKey, webdavClient: webdavClient, cloud189Client: cloud189Client
+      seriesKey: seriesKey, webdavClient: webdavClient, cloud189Client: cloud189Client,
+      contentVersion: contentVersion
     ) else {
       return false
     }
@@ -106,13 +163,7 @@ nonisolated final class CoverStore: @unchecked Sendable {
     let image = await PageCache.shared.image(sourceID: sourceID, index: 0, maxPixel: 600) {
       source.pageImage(at: 0, maxPixel: 600)
     }
-    guard let image, let jpeg = image.jpegData(compressionQuality: 0.82) else { return false }
-    do {
-      try jpeg.write(to: target, options: .atomic)
-      return true
-    } catch {
-      return false
-    }
+    return save(image)
   }
 
   func remove(seriesKey: String) {

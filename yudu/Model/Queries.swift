@@ -26,12 +26,14 @@ enum ReaderMode: String, CaseIterable, Identifiable, Codable {
 enum ReaderFit: String, CaseIterable, Identifiable, Codable {
   case width
   case height
+  case page
 
   var id: String { rawValue }
   var label: String {
     switch self {
     case .width: "适宽"
     case .height: "适高"
+    case .page: "整页"
     }
   }
 }
@@ -40,7 +42,7 @@ enum ReaderFit: String, CaseIterable, Identifiable, Codable {
 struct ReaderDefaults: Codable {
   var mode: ReaderMode = .single
   var rtl: Bool = true
-  var fit: ReaderFit = .width
+  var fit: ReaderFit = .page
 
   static let storageKey = "readerDefaults"
 
@@ -76,8 +78,15 @@ struct ChapterRef: Identifiable, Equatable, Hashable {
   var pageCount: Int
   var seriesKey: String
   var seriesTitle: String
+  var modifiedAt: Date = .distantPast
+  var fileSize: Int64 = 0
 
   var isPDF: Bool { kind == "pdf" }
+
+  /// 文件变化后让页缓存/远端缓存自然失效。
+  var cacheVersion: String {
+    "\(path)#\(Int(modifiedAt.timeIntervalSince1970))#\(fileSize)"
+  }
 }
 
 // MARK: - 查询服务（全部在主线程调用）
@@ -103,7 +112,9 @@ enum Queries {
         kind: ch.kind,
         pageCount: ch.pageCount,
         seriesKey: series.key,
-        seriesTitle: series.title
+        seriesTitle: series.title,
+        modifiedAt: ch.modifiedAt,
+        fileSize: ch.fileSize
       )
     }
   }
@@ -116,7 +127,9 @@ enum Queries {
       kind: chapter.kind,
       pageCount: chapter.pageCount,
       seriesKey: chapter.series?.key ?? "",
-      seriesTitle: chapter.series?.title ?? ""
+      seriesTitle: chapter.series?.title ?? "",
+      modifiedAt: chapter.modifiedAt,
+      fileSize: chapter.fileSize
     )
   }
 
@@ -136,11 +149,14 @@ enum Queries {
     return chapters.last
   }
 
-  /// 进入时落在哪一页：读完（或停在末页）则从头，否则停在进度页
+  /// 进入时落在哪一页：读完（或停在末页）则从头，否则停在进度页。
+  /// 云端 zip/PDF 在回填页数前 pageCount 为 0，此时直接信任已存的进度页，
+  /// 不能按“1 页”来处理，否则每次重扫都会把续读位置丢回第 1 页。
   static func resumePage(_ chapter: ChapterEntity) -> Int {
     guard let p = chapter.progress else { return 0 }
     if p.completed { return 0 }
-    let count = max(chapter.pageCount, 1)
+    if chapter.pageCount <= 0 { return max(p.page, 0) }
+    let count = chapter.pageCount
     if p.page >= count - 1 { return 0 }
     return min(max(p.page, 0), count - 1)
   }
@@ -208,7 +224,7 @@ enum Queries {
 
   // MARK: 偏好
 
-  static func prefs(for series: SeriesEntity, context: ModelContext) -> EffectivePrefs {
+  static func prefs(for series: SeriesEntity) -> EffectivePrefs {
     let defaults = ReaderDefaults.load()
     let stored = Self.seriesPrefs(series.key)
     return EffectivePrefs(
@@ -235,7 +251,7 @@ enum Queries {
     return try? JSONDecoder().decode(StoredSeriesPrefs.self, from: data)
   }
 
-  static func savePrefs(seriesKey: String, context: ModelContext,
+  static func savePrefs(seriesKey: String,
                         mode: ReaderMode? = nil, rtl: Bool? = nil, fit: ReaderFit? = nil) {
     var stored = seriesPrefs(seriesKey) ?? StoredSeriesPrefs()
     if let mode { stored.mode = mode }

@@ -31,11 +31,9 @@ nonisolated final class RangeFetcher: @unchecked Sendable {
   func read(offset: Int, length: Int) -> Data? {
     guard length > 0 else { return Data() }
     for attempt in 0..<2 {
-      guard let url = currentURL(rebinding: attempt > 0) else { return nil }
-      var req = URLRequest(url: url)
-      req.httpMethod = "GET"
-      req.setValue("bytes=\(offset)-\(offset + length - 1)", forHTTPHeaderField: "Range")
-      req.timeoutInterval = 30
+      guard let url = currentURL(rebinding: attempt > 0),
+            let req = request(for: url, offset: offset, length: length)
+      else { return nil }
       let semaphore = DispatchSemaphore(value: 0)
       nonisolated(unsafe) var payload: Data?
       nonisolated(unsafe) var status = 0
@@ -65,6 +63,20 @@ nonisolated final class RangeFetcher: @unchecked Sendable {
     return nil
   }
 
+  /// WebDAV 必须带认证；天翼云盘直链本身不需要认证。
+  private func request(for url: URL, offset: Int, length: Int) -> URLRequest? {
+    switch source {
+    case .webdav(let client, _):
+      return client.rangeRequest(url, offset: offset, length: length)
+    case .cloud189:
+      var req = URLRequest(url: url)
+      req.httpMethod = "GET"
+      req.setValue("bytes=\(offset)-\(offset + length - 1)", forHTTPHeaderField: "Range")
+      req.timeoutInterval = 30
+      return req
+    }
+  }
+
   private func currentURL(rebinding: Bool) -> URL? {
     switch source {
     case .webdav(_, let url):
@@ -78,7 +90,10 @@ nonisolated final class RangeFetcher: @unchecked Sendable {
       let semaphore = DispatchSemaphore(value: 0)
       nonisolated(unsafe) var resolved: URL?
       Task.detached {
-        resolved = try? await client.downloadURL(fileId: fileId, familyId: familyId)
+        // 直链失效重绑时必须绕过 client 的短缓存，否则会拿回同一条过期地址
+        resolved = try? await client.downloadURL(
+          fileId: fileId, familyId: familyId, forceRefresh: rebinding
+        )
         semaphore.signal()
       }
       semaphore.wait()
@@ -94,6 +109,7 @@ nonisolated final class RangeFetcher: @unchecked Sendable {
 nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
   private let fetcher: RangeFetcher
   private let entries: [ZipFile.Entry]
+  private let totalSize: Int
 
   enum RemoteZipError: Error, LocalizedError {
     case noRangeSupport
@@ -102,16 +118,25 @@ nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
 
   init?(fetcher: RangeFetcher) {
     self.fetcher = fetcher
-    guard let total = fetcher.totalSize(), total > 22 else { return nil }
+    guard let total = fetcher.totalSize(), total > 22,
+          let totalInt = Int(exactly: total)
+    else { return nil }
+    self.totalSize = totalInt
     // EOCD 在文件尾 64KB+22 内；ZipFile 的定位算法直接可用于尾部窗口
-    let tailLength = Int(min(UInt64(65_558), UInt64(total)))
-    guard let tail = fetcher.read(offset: Int(total) - tailLength, length: tailLength) else {
+    let tailLength = min(65_558, totalInt)
+    guard let tail = fetcher.read(offset: totalInt - tailLength, length: tailLength) else {
       return nil
     }
-    guard let (centralOffset, centralSize, _) = try? ZipFile.locateCentralDirectoryPublic(tail) else {
+    guard let (centralOffset, centralSize, _) = try? ZipFile.locateCentralDirectoryPublic(tail),
+          let offset = Int(exactly: centralOffset),
+          let size = Int(exactly: centralSize),
+          offset >= 0, size >= 0,
+          offset <= totalInt, size <= totalInt - offset,
+          size <= ZipFile.maxEntryBytes
+    else {
       return nil
     }
-    guard let central = fetcher.read(offset: Int(centralOffset), length: Int(centralSize)) else {
+    guard let central = fetcher.read(offset: offset, length: size) else {
       return nil
     }
     guard let parsed = ZipFile.parseCentralDirectorySlice(central) else { return nil }
@@ -119,6 +144,8 @@ nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
     guard !pages.isEmpty else { return nil }
     self.entries = pages.sorted { naturalCompare($0.name, $1.name) }
   }
+
+  var isRemote: Bool { true }
 
   var pageCount: Int { entries.count }
 
@@ -134,23 +161,28 @@ nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
   private func entryData(at index: Int) -> Data? {
     guard entries.indices.contains(index) else { return nil }
     let entry = entries[index]
-    let lho = Int(entry.localHeaderOffset)
-    guard let header = fetcher.read(offset: lho, length: 30 + 512) else { return nil }
-    guard header.count > 30,
+    guard let lho = Int(exactly: entry.localHeaderOffset),
+          lho >= 0, lho <= totalSize - 30,
+          let header = fetcher.read(offset: lho, length: 30 + 512),
+          header.count >= 30,
           UInt32(header[0]) | (UInt32(header[1]) << 8) | (UInt32(header[2]) << 16) | (UInt32(header[3]) << 24) == 0x04034B50
     else { return nil }
     func u16(_ o: Int) -> Int { Int(header[o]) | (Int(header[o + 1]) << 8) }
     let dataStart = 30 + u16(26) + u16(28)
-    let compLen = Int(entry.compressedSize)
-    guard let payload = fetcher.read(offset: lho + dataStart, length: compLen), payload.count == compLen else {
-      return nil
-    }
+    guard dataStart <= totalSize - lho else { return nil }
+    guard let compLen = Int(exactly: entry.compressedSize),
+          compLen > 0, compLen <= ZipFile.maxEntryBytes,
+          compLen <= totalSize - lho - dataStart,
+          let payload = fetcher.read(offset: lho + dataStart, length: compLen),
+          payload.count == compLen
+    else { return nil }
     switch entry.method {
     case 0:
       return payload
     case 8:
-      let out = Int(entry.uncompressedSize)
-      guard out > 0, out < 400 * 1024 * 1024 else { return nil }
+      guard let out = Int(exactly: entry.uncompressedSize),
+            out > 0, out <= ZipFile.maxEntryBytes
+      else { return nil }
       var dst = Data(count: out)
       let written = dst.withUnsafeMutableBytes { dstPtr in
         payload.withUnsafeBytes { srcPtr in

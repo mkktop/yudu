@@ -52,10 +52,17 @@ struct SettingsView: View {
               .font(.caption).foregroundStyle(YuduTheme.muted)
           }
           settingsGroup("护眼与亮度", eyebrow: "EYE COMFORT") {
-            comfortSlider(title: "阅读亮度", value: Binding(get: { eyeCare.brightness }, set: { eyeCare.brightness = $0; eyeCare.save() }), range: 0.4...1, percent: Int(eyeCare.brightness * 100), icon: "sun.max")
-            Divider().overlay(YuduTheme.line)
-            comfortSlider(title: "暖色滤镜", value: Binding(get: { eyeCare.warmth }, set: { eyeCare.warmth = $0; eyeCare.save() }), range: 0...0.6, percent: Int(eyeCare.warmth / 0.6 * 100), icon: "moon.stars")
-            Toggle("夜间自动启用暖色", isOn: Binding(get: { eyeCare.scheduleEnabled }, set: { eyeCare.scheduleEnabled = $0; eyeCare.save() }))
+            Toggle("护眼模式", isOn: Binding(get: { eyeCare.enabled }, set: { eyeCare.enabled = $0; eyeCare.save() }))
+            Text("默认关闭，漫画保持原色。开启后应用下方的亮度与暖色设置。")
+              .font(.caption).foregroundStyle(YuduTheme.muted)
+            VStack(alignment: .leading, spacing: 16) {
+              comfortSlider(title: "阅读亮度", value: Binding(get: { eyeCare.brightness }, set: { eyeCare.brightness = $0; eyeCare.save() }), range: 0.4...1, percent: Int(eyeCare.brightness * 100), icon: "sun.max")
+              Divider().overlay(YuduTheme.line)
+              comfortSlider(title: "暖色滤镜", value: Binding(get: { eyeCare.warmth }, set: { eyeCare.warmth = $0; eyeCare.save() }), range: 0...0.6, percent: Int(eyeCare.warmth / 0.6 * 100), icon: "moon.stars")
+              Toggle("夜间自动启用暖色", isOn: Binding(get: { eyeCare.scheduleEnabled }, set: { eyeCare.scheduleEnabled = $0; eyeCare.save() }))
+            }
+            .disabled(!eyeCare.enabled)
+            .opacity(eyeCare.enabled ? 1 : 0.45)
             Text("20:00 – 次日 07:00 生效；护眼滤镜只影响漫画画面。")
               .font(.caption).foregroundStyle(YuduTheme.muted)
           }

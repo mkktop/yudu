@@ -10,6 +10,6 @@ Orbital 改版以深空背景、冷青交互与轨道几何统一书架、书库
 - [离线设计预览](docs/orbital-preview.html)：下载后用浏览器打开，可切换深浅模式与示例筛选。
 - 原生运行截图：查看 GitHub Actions 的 `simulator-screenshots` artifact。上图为设计参考，非运行截图。
 
-用 Xcode 打开 `yudu.xcodeproj`，选择 iPhone / iPad 模拟器运行。项目保留既有发行目标设置；CI 构建会将最低系统覆盖为 iOS 18，以便在可用模拟器 SDK 上验证。真机运行需要配置自己的签名团队。
+用 Xcode 打开 `yudu.xcodeproj`，选择 iPhone / iPad 模拟器运行。发行目标为 iOS 18。真机运行需要配置自己的签名团队。
 
 [构建与回归检查步骤](docs/design.md#实现与验证)包含 SwiftData 逻辑检查和离线模拟器阅读流程。应用运行不依赖第三方库。

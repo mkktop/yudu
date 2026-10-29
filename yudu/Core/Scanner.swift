@@ -3,7 +3,7 @@ import CoreGraphics
 
 // MARK: - 扫描结果（纯值类型，后台产出，主线程落库）
 
-struct ScannedChapter {
+struct ScannedChapter: Codable {
   var path: String
   var title: String
   var volume: String?
@@ -14,7 +14,7 @@ struct ScannedChapter {
   var mtime: Date
 }
 
-struct ScannedSeries {
+struct ScannedSeries: Codable {
   var key: String
   var title: String
   var chapters: [ScannedChapter]
@@ -23,6 +23,9 @@ struct ScannedSeries {
 struct ScanReport {
   var series: [ScannedSeries]
   var errors: [String]
+  /// false 表示扫描过程中有目录/网络读取失败，结果不完整。
+  /// 此时调用方只能新增或更新，不能删除旧系列/旧章节，否则一次掉线就会清空书库。
+  var isComplete: Bool = true
 }
 
 // MARK: - 扫描器（跑在后台执行器）
@@ -35,33 +38,38 @@ nonisolated enum LibraryScanner {
   static func scanLibraryRoot(root: URL) -> ScanReport {
     var series: [ScannedSeries] = []
     var errors: [String] = []
+    var isComplete = true
 
     let fm = FileManager.default
     guard let children = try? fm.contentsOfDirectory(
       at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
     ) else {
-      return ScanReport(series: [], errors: ["无法读取目录：\(root.path)"])
+      return ScanReport(series: [], errors: ["无法读取目录：\(root.path)"], isComplete: false)
     }
 
     for child in children.sorted(by: { naturalCompare($0.lastPathComponent, $1.lastPathComponent) }) {
       let isDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
       if isDir {
-        if let s = scanSeriesFolder(child, libraryKey: root.path) {
-          series.append(s)
-        } else {
-          let empty = ((try? fm.contentsOfDirectory(at: child, includingPropertiesForKeys: nil)) ?? []).isEmpty
-          if !empty { errors.append("文件夹内没有可读内容：\(child.lastPathComponent)") }
+        switch scanSeriesFolderResult(child, libraryKey: root.path) {
+        case .series(let scanned):
+          series.append(scanned)
+        case .empty:
+          break
+        case .unreadable(let name):
+          errors.append("无法读取文件夹：\(name)")
+          isComplete = false
         }
       } else if MediaSniff.isArchive(child.lastPathComponent) || MediaSniff.isPDF(child.lastPathComponent) {
         if let s = scanSingleFile(child, libraryKey: root.path) {
           series.append(s)
         } else {
           errors.append("无法读取：\(child.lastPathComponent)")
+          isComplete = false
         }
       }
       // 其他类型文件忽略
     }
-    return ScanReport(series: series, errors: errors)
+    return ScanReport(series: series, errors: errors, isComplete: isComplete)
   }
 
   /// 单个压缩包 / PDF 作为一个系列（导入文件、库根散装文件共用）
@@ -75,22 +83,34 @@ nonisolated enum LibraryScanner {
     )
   }
 
+  enum SeriesScanResult {
+    case series(ScannedSeries)
+    case empty
+    /// 有子目录/文件无法读取；结果不完整，调用方必须保留旧数据。
+    case unreadable(String)
+  }
+
   /// 一个系列文件夹 → 系列与它的章节
-  static func scanSeriesFolder(_ folder: URL, libraryKey: String) -> ScannedSeries? {
+  static func scanSeriesFolderResult(_ folder: URL, libraryKey: String) -> SeriesScanResult {
     let fm = FileManager.default
     guard let children = try? fm.contentsOfDirectory(
       at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
-    ) else { return nil }
+    ) else { return .unreadable(folder.lastPathComponent) }
 
     var chapters: [ScannedChapter] = []
     var looseImages = 0
+    var unreadableChild: String?
 
     for child in children {
       let isDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
       if isDir {
-        let images = (try? fm.contentsOfDirectory(
+        guard let inner = try? fm.contentsOfDirectory(
           at: child, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-        ))?.filter { MediaSniff.isImage($0.lastPathComponent) } ?? []
+        ) else {
+          unreadableChild = child.lastPathComponent
+          continue
+        }
+        let images = inner.filter { MediaSniff.isImage($0.lastPathComponent) }
         if !images.isEmpty {
           chapters.append(makeChapter(url: child, kind: "folder", pages: images.count))
         }
@@ -108,12 +128,17 @@ nonisolated enum LibraryScanner {
       chapters.append(makeChapter(url: folder, kind: "folder", pages: looseImages))
     }
 
-    guard !chapters.isEmpty else { return nil }
+    if let unreadableChild {
+      return .unreadable("\(folder.lastPathComponent)/\(unreadableChild)")
+    }
+    guard !chapters.isEmpty else { return .empty }
 
-    return ScannedSeries(
-      key: "\(libraryKey)/\(folder.lastPathComponent)",
-      title: folder.lastPathComponent,
-      chapters: sortChapters(chapters)
+    return .series(
+      ScannedSeries(
+        key: "\(libraryKey)/\(folder.lastPathComponent)",
+        title: folder.lastPathComponent,
+        chapters: sortChapters(chapters)
+      )
     )
   }
 

@@ -22,16 +22,21 @@ struct ReaderSettingsSheet: View {
           }.listRowBackground(YuduTheme.surface)
         }
         Section {
-          VStack(alignment: .leading) {
-            Label("亮度 \(Int(eyeCare.brightness * 100))%", systemImage: "sun.max")
-            Slider(value: $eyeCare.brightness, in: 0.4...1).accessibilityLabel("阅读亮度")
+          Toggle("护眼模式", isOn: $eyeCare.enabled)
+          Group {
+            VStack(alignment: .leading) {
+              Label("亮度 \(Int(eyeCare.brightness * 100))%", systemImage: "sun.max")
+              Slider(value: $eyeCare.brightness, in: 0.4...1).accessibilityLabel("阅读亮度")
+            }
+            VStack(alignment: .leading) {
+              Label("暖色 \(Int(eyeCare.warmth / 0.6 * 100))%", systemImage: "moon.stars")
+              Slider(value: $eyeCare.warmth, in: 0...0.6).accessibilityLabel("暖色滤镜")
+            }
+            Toggle("夜间自动暖色", isOn: $eyeCare.scheduleEnabled)
           }
-          VStack(alignment: .leading) {
-            Label("暖色 \(Int(eyeCare.warmth / 0.6 * 100))%", systemImage: "moon.stars")
-            Slider(value: $eyeCare.warmth, in: 0...0.6).accessibilityLabel("暖色滤镜")
-          }
-          Toggle("夜间自动暖色", isOn: $eyeCare.scheduleEnabled)
-        } header: { Text("护眼滤镜") } footer: { Text("滤镜仅影响漫画画面。夜间时段为 20:00 – 次日 07:00。") }
+          .disabled(!eyeCare.enabled)
+          .opacity(eyeCare.enabled ? 1 : 0.5)
+        } header: { Text("护眼滤镜") } footer: { Text("默认关闭，漫画保持原色。开启后应用亮度与暖色；夜间时段为 20:00 – 次日 07:00，滤镜仅影响漫画画面。") }
           .listRowBackground(YuduTheme.surface)
       }
       .yuduPage()

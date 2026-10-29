@@ -34,6 +34,7 @@ struct SeriesDetailView: View {
   var body: some View {
     let _ = refreshTick
     let targetID = Queries.continueTarget(series)?.persistentModelID
+    let groupList = groups
     ScrollViewReader { proxy in
       ScrollView {
         LazyVStack(alignment: .leading, spacing: 24) {
@@ -60,10 +61,10 @@ struct SeriesDetailView: View {
               }.font(.caption).fixedSize().frame(minHeight: 44)
             }
           }
-          if groups.isEmpty {
+          if groupList.isEmpty {
             NoticeView(title: orderedChapters.isEmpty ? "还没有可读章节" : "所有章节都已读完", message: orderedChapters.isEmpty ? "返回书架下拉刷新，或到书库检查来源。" : "关闭「只看未读」可以重新阅读。", icon: "book.closed")
           }
-          ForEach(groups) { group in
+          ForEach(groupList) { group in
             LazyVStack(spacing: 0) {
               Button {
                 if collapsedVolumes.contains(group.id) { collapsedVolumes.remove(group.id) }
@@ -145,13 +146,16 @@ struct SeriesDetailView: View {
         ProgressView(value: info.fraction).tint(YuduTheme.accent)
       }
       if let target = info.status == .finished ? orderedChapters.first : Queries.continueTarget(series) {
-        NavigationLink(value: BookshelfRoute.reader(series: series, startChapter: target)) {
+        Button {
+          router.openReader(series: series, startChapter: target)
+        } label: {
           HStack(spacing: 10) {
             Image(systemName: "play.fill")
             Text(info.status == .unread ? "开始阅读" : (info.status == .finished ? "再次阅读" : "继续阅读"))
             Text("· \(target.title)").font(.caption).lineLimit(1).opacity(0.75)
           }.padding(.horizontal, 14)
-        }.buttonStyle(OrbitalButtonStyle())
+        }
+        .buttonStyle(OrbitalButtonStyle())
       }
       if series.library?.kind == "webdav" || series.library?.kind == "cloud189" { offlineButton }
       if let error = libraryService.prefetchErrors[series.key] {
@@ -182,7 +186,9 @@ struct SeriesDetailView: View {
   private func chapterRow(_ chapter: ChapterEntity, current: Bool) -> some View {
     let completed = chapter.progress?.completed == true
     return HStack(spacing: 0) {
-      NavigationLink(value: BookshelfRoute.reader(series: series, startChapter: chapter)) {
+      Button {
+        router.openReader(series: series, startChapter: chapter)
+      } label: {
         HStack(spacing: 12) {
           Text(String(format: "%02d", chapter.sortIndex + 1))
             .font(.system(.caption, design: .monospaced)).foregroundStyle(current ? YuduTheme.accent : YuduTheme.muted)

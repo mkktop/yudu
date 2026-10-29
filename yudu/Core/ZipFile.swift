@@ -6,6 +6,9 @@ import Compression
 /// 算法与桌面版 remoteZip.ts 一致：EOCD → 中央目录 → 本地头 → 按条目解压。
 nonisolated final class ZipFile: @unchecked Sendable {
 
+  /// 单页解压上限。漫画一页通常几 MB，128MB 足够且能挡住 zip bomb。
+  static let maxEntryBytes = 128 * 1024 * 1024
+
   struct Entry {
     let name: String
     let compressedSize: UInt64
@@ -72,10 +75,17 @@ nonisolated final class ZipFile: @unchecked Sendable {
         | (UInt32(data[data.startIndex + offset + 3]) << 24)
     }
 
+    // 恶意 zip64 头可以把字段填成超大值；先用 exactly 转换 + 范围校验挡住越界。
+    guard let start = Int(exactly: centralOffset),
+          let size = Int(exactly: centralSize),
+          start >= 0, size >= 0,
+          start <= data.count, size <= data.count - start
+    else { throw ZipError.corrupt("中央目录范围异常") }
+
     var parsed: [Entry] = []
-    var cursor = Int(centralOffset)
-    let end = min(Int(centralOffset + centralSize), data.count)
-    while cursor + 46 <= end, parsed.count < Int(entryCount) {
+    var cursor = start
+    let end = start + size
+    while cursor <= end - 46, UInt64(parsed.count) < entryCount {
       guard readUInt32(cursor) == 0x02014B50 else { break } // PK\x01\x02
       let method = readUInt16(cursor + 10)
       let compSize = readUInt32(cursor + 20)
@@ -84,7 +94,8 @@ nonisolated final class ZipFile: @unchecked Sendable {
       let extraLen = Int(readUInt16(cursor + 30))
       let commentLen = Int(readUInt16(cursor + 32))
       let lhoRaw = readUInt32(cursor + 42)
-      guard cursor + 46 + nameLen + extraLen + commentLen <= end else { break }
+      let recordLength = 46 + nameLen + extraLen + commentLen
+      guard recordLength <= end - cursor else { break }
       let nameData = data.subdata(in: (cursor + 46)..<(cursor + 46 + nameLen))
       let name = String(data: nameData, encoding: .utf8)
         ?? String(data: nameData, encoding: .isoLatin1)
@@ -116,30 +127,36 @@ nonisolated final class ZipFile: @unchecked Sendable {
       if isPageEntry(entry.name) {
         parsed.append(entry)
       }
-      cursor += 46 + nameLen + extraLen + commentLen
+      cursor += recordLength
     }
     return parsed
   }
 
   /// 解出一条图片数据
   func entryData(_ entry: Entry) throws -> Data {
-    let lho = Int(entry.localHeaderOffset)
-    guard lho + 30 <= data.count, readUInt32(lho) == 0x04034B50 else {
+    guard let lho = Int(exactly: entry.localHeaderOffset),
+          lho >= 0, lho <= data.count - 30,
+          readUInt32(lho) == 0x04034B50
+    else {
       throw ZipError.corrupt("本地头定位失败")
     }
     let nameLen = Int(readUInt16(lho + 26))
     let extraLen = Int(readUInt16(lho + 28))
     let dataStart = lho + 30 + nameLen + extraLen
-    let dataEnd = dataStart + Int(entry.compressedSize)
-    guard dataStart >= 0, dataEnd <= data.count else { throw ZipError.corrupt("数据范围越界") }
-    let payload = data.subdata(in: dataStart..<dataEnd)
+    guard dataStart <= data.count else { throw ZipError.corrupt("本地头越界") }
+    guard let compressedSize = Int(exactly: entry.compressedSize),
+          compressedSize >= 0, compressedSize <= Self.maxEntryBytes,
+          compressedSize <= data.count - dataStart
+    else { throw ZipError.corrupt("数据范围越界") }
+    let payload = data.subdata(in: dataStart..<(dataStart + compressedSize))
 
     switch entry.method {
     case 0:
       return payload
     case 8:
-      let dstCapacity = Int(entry.uncompressedSize)
-      guard dstCapacity > 0, dstCapacity < 400 * 1024 * 1024 else { throw ZipError.outOfMemory }
+      guard let dstCapacity = Int(exactly: entry.uncompressedSize),
+            dstCapacity > 0, dstCapacity <= Self.maxEntryBytes
+      else { throw ZipError.outOfMemory }
       var dst = Data(count: dstCapacity)
       let written = dst.withUnsafeMutableBytes { dstPtr -> Int in
         payload.withUnsafeBytes { srcPtr -> Int in
@@ -283,8 +300,9 @@ nonisolated final class ZipFile: @unchecked Sendable {
     if entryCount == 0xFFFF_FFFF || centralOffset == 0xFFFF_FFFF || centralSize == 0xFFFF_FFFF {
       let locatorOffset = eocdOffset - 20
       if locatorOffset >= 0, get32(locatorOffset) == 0x07064B50 {
-        let eocd64Offset = Int(get64(data, locatorOffset + 8))
-        if eocd64Offset >= 0, eocd64Offset + 56 <= data.count,
+        let rawEOCD64Offset = get64(data, locatorOffset + 8)
+        if let eocd64Offset = Int(exactly: rawEOCD64Offset),
+           eocd64Offset >= 0, eocd64Offset + 56 <= data.count,
            get32(eocd64Offset) == 0x06064B50 {
           entryCount = get64(data, eocd64Offset + 32)
           centralSize = get64(data, eocd64Offset + 40)
@@ -292,7 +310,10 @@ nonisolated final class ZipFile: @unchecked Sendable {
         }
       }
     }
-    guard centralOffset + centralSize <= UInt64(data.count) else {
+    // 用减法比较，避免恶意值触发 UInt64 加法溢出 trap。
+    guard centralOffset <= UInt64(data.count),
+          centralSize <= UInt64(data.count) - centralOffset
+    else {
       throw ZipError.corrupt("中央目录范围异常")
     }
     return (centralOffset, centralSize, entryCount)
