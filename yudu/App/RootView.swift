@@ -20,7 +20,7 @@ struct RootView: View {
         .tabItem { Label("书架", systemImage: "books.vertical") }
         .tag(AppTab.bookshelf)
       LibraryView()
-        .tabItem { Label("书库", systemImage: "square.stack.3d.up") }
+        .tabItem { Label("资源库", systemImage: "square.stack.3d.up") }
         .tag(AppTab.library)
       StatsView()
         .tabItem { Label("统计", systemImage: "chart.bar.xaxis") }
@@ -45,6 +45,9 @@ struct RootView: View {
       didStart = true
       if storageNotice != nil { showStorageNotice = true }
       #if DEBUG
+      if ProcessInfo.processInfo.arguments.contains("-yuduOpenLibrary") {
+        router.tab = .library
+      }
       SelfTest.maybeRun(router: router, libraryService: libraryService)
       #endif
     }

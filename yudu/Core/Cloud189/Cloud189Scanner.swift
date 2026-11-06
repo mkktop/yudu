@@ -25,7 +25,7 @@ nonisolated enum Cloud189Scanner {
 
   static func scanLibrary(
     client: Cloud189Client, rootFolderId: String, familyId: String?, libraryKey: String, libraryName: String,
-    mode: LibraryScanMode = .incremental,
+    mode: LibraryScanMode = .incremental, layout: LibraryScanLayout = .multi,
     onProgress: (@Sendable (Int, Int, String) -> Void)? = nil
   ) async -> ScanReport {
     var errors: [String] = []
@@ -91,48 +91,20 @@ nonisolated enum Cloud189Scanner {
 
     ScanCache.save(cache, libraryKey: libraryKey)
 
-    // 布局识别（对齐桌面版 cloud/scanner）：
-    // volume=直接含图片/压缩包  wrapper=子目录全是卷（同名嵌套包装层）  series=独立作品
-    let classified = rootDirs.compactMap { dirEntries[$0.id] }
-    let singleSeries = !classified.isEmpty
-      && classified.count == rootDirs.count
-      && classified.allSatisfy { $0.kind != "series" }
-
-    if singleSeries {
-      // 单系列库：挂载的整个目录就是一部作品（卷文件夹/嵌套包装层展开/散包都是章节）
-      var chapters: [ScannedChapter] = []
-      for item in rootArchives.sorted(by: { naturalCompare($0.name, $1.name) }) {
-        chapters += archiveEntries[item.id]?.chapters ?? []
-      }
-      for dir in rootDirs {
-        chapters += dirEntries[dir.id]?.chapters ?? []
-      }
-      if !chapters.isEmpty {
-        return ScanReport(
-          series: [ScannedSeries(key: libraryKey, title: libraryName, chapters: LibraryScanner.sortChapters(chapters))],
-          errors: errors,
-          isComplete: isComplete
-        )
-      }
-      return ScanReport(series: [], errors: errors, isComplete: isComplete)
-    }
-
-    // 多系列：根下每个目录一部作品（内部再分章节），散包各自成单文件系列
-    var series: [ScannedSeries] = []
-    for dir in rootDirs {
-      guard let entry = dirEntries[dir.id] else { continue }
-      if let scanned = entry.series {
-        series.append(scanned)
-      } else if entry.complete {
-        errors.append("目录无内容：\(dir.name)")
+    // 形状分类结果交给共用装配器按布局（multi/single）出报告
+    let sortedArchives = rootArchives.sorted(by: { naturalCompare($0.name, $1.name) })
+    let dirs: [(name: String, child: ClassifiedChild?)] = rootDirs.compactMap { dir in
+      dirEntries[dir.id].map { entry in
+        (dir.name, ClassifiedChild(kind: entry.kind, series: entry.series, chapters: entry.chapters))
       }
     }
-    for item in rootArchives.sorted(by: { naturalCompare($0.name, $1.name) }) {
-      if let scanned = archiveEntries[item.id]?.series {
-        series.append(scanned)
-      }
-    }
-    return ScanReport(series: series, errors: errors, isComplete: isComplete)
+    let archiveChapters = sortedArchives.flatMap { archiveEntries[$0.id]?.chapters ?? [] }
+    let archiveSeries = sortedArchives.compactMap { archiveEntries[$0.id]?.series }
+    return LibraryScanner.assembleLibrary(
+      dirs: dirs, archiveChapters: archiveChapters, archiveSeries: archiveSeries,
+      libraryKey: libraryKey, libraryName: libraryName,
+      layout: layout, errors: errors, isComplete: isComplete
+    )
   }
 
   /// 扫描根目录下的一个子目录，同时产出两种布局需要的结果：
@@ -242,8 +214,8 @@ nonisolated enum Cloud189Scanner {
       }
     }
 
-    // 目录里散图与章节共存时，散图整体也算一章（对齐桌面版）
-    if looseImages > 0 {
+    // 纯散图系列：整个文件夹就是一话；散图与章节共存时，明显的散图内容（≥3 张）也补一章
+    if looseImages > 0 && (chapters.isEmpty || looseImages >= 3) {
       chapters.append(makeChapter(item: folder, familyId: familyId, kind: "folder", pages: looseImages))
     }
     guard !chapters.isEmpty else { return (nil, complete) }

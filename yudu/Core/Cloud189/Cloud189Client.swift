@@ -44,14 +44,18 @@ nonisolated final class Cloud189Client: @unchecked Sendable {
     var loginName: String?
   }
 
-  static let sessionAccount = "cloud189-session"
+  /// 旧版全局会话槽（迁移前的数据还在这里，只读不删）
+  static let legacySessionAccount = "cloud189-session"
+  /// 每个实例绑定一个 Keychain 槽，实现多账号并存；默认槽仅供旧代码/迁移兜底
+  private let sessionSlot: String
   private let sessionLock = NSLock()
   private var storedSession: Session?
   private var refreshTask: Task<Session, Error>?
   // 家庭云 id 由调用方按请求传入，客户端本身不持有可变状态。
 
-  init() {
-    if let data = Keychain.get(account: Self.sessionAccount),
+  init(sessionAccount: String = Cloud189Client.legacySessionAccount) {
+    sessionSlot = sessionAccount
+    if let data = Keychain.get(account: sessionSlot),
        let decoded = try? JSONDecoder().decode(Session.self, from: Data(data.utf8)) {
       storedSession = decoded
     }
@@ -66,11 +70,11 @@ nonisolated final class Cloud189Client: @unchecked Sendable {
 
   func saveSession() {
     if let session, let data = try? JSONEncoder().encode(session) {
-      Keychain.set(String(data: data, encoding: .utf8) ?? "", account: Self.sessionAccount)
+      Keychain.set(String(data: data, encoding: .utf8) ?? "", account: sessionSlot)
     } else {
       // 会话已失效：必须同时清掉钥匙串，否则下次启动会读到过期会话，
       // 登录页会误以为已登录而无法回到扫码流程。
-      Keychain.remove(account: Self.sessionAccount)
+      Keychain.remove(account: sessionSlot)
     }
   }
 

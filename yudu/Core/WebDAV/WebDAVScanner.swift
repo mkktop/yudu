@@ -2,15 +2,14 @@ import Foundation
 import CryptoKit
 import UIKit
 
-// MARK: - WebDAV 扫描（结构与本地扫描一致：根目录子文件夹=系列、压缩包=话）
+// MARK: - WebDAV 扫描（结构与本地/天翼扫描一致：形状分类 volume/wrapper/series + 布局装配）
 
 nonisolated enum WebDAVScanner {
 
   static func scanLibrary(
-    client: WebDAVClient, root: URL, libraryKey: String,
-    mode: LibraryScanMode = .incremental
+    client: WebDAVClient, root: URL, libraryKey: String, libraryName: String,
+    mode: LibraryScanMode = .incremental, layout: LibraryScanLayout = .multi
   ) async -> ScanReport {
-    var series: [ScannedSeries] = []
     var errors: [String] = []
     var isComplete = true
     let previousCache = ScanCache.load(libraryKey: libraryKey)
@@ -24,6 +23,10 @@ nonisolated enum WebDAVScanner {
       return ScanReport(series: [], errors: [error.localizedDescription], isComplete: false)
     }
 
+    var dirs: [(name: String, child: ClassifiedChild?)] = []
+    var archiveChapters: [ScannedChapter] = []
+    var archiveSeries: [ScannedSeries] = []
+
     // 根目录子项逐个比对指纹：没变化就直接复用上次结果，不再下钻。
     for item in rootItems.sorted(by: { naturalCompare($0.name, $1.name) }) {
       await ReaderActivity.waitWhileReading()
@@ -31,30 +34,23 @@ nonisolated enum WebDAVScanner {
       let fingerprint = fingerprint(of: item)
       if let cached = previousCache[key],
          ScanCache.canReuse(cached, fingerprint: fingerprint, mode: mode) {
-        if let scanned = cached.series {
-          series.append(scanned)
-        } else if cached.kind == "series" {
-          errors.append("目录无内容：\(item.name)")
-        }
+        dirs.append((item.name, ClassifiedChild(kind: cached.kind, series: cached.series, chapters: cached.chapters)))
         cache[key] = cached
         continue
       }
 
       if item.isDirectory {
-        guard let entry = await scanSeriesFolder(
+        guard let entry = await classifyWebDAVDir(
           client: client, folder: item, libraryKey: libraryKey,
           previousPages: previousCache[key]?.folderPages ?? [:], mode: mode
         ) else {
           errors.append("目录读取失败：\(item.name)")
           isComplete = false
+          dirs.append((item.name, nil))
           if let old = previousCache[key] { cache[key] = old }
           continue
         }
-        if let scanned = entry.series {
-          series.append(scanned)
-        } else if entry.complete {
-          errors.append("目录无内容：\(item.name)")
-        }
+        dirs.append((item.name, ClassifiedChild(kind: entry.kind, series: entry.series, chapters: entry.chapters)))
         if !entry.complete {
           errors.append("目录读取失败：\(item.name)")
           isComplete = false
@@ -62,60 +58,79 @@ nonisolated enum WebDAVScanner {
         cache[key] = entry
       } else if item.isArchive || item.isPDF {
         let entry = archiveEntry(item: item, libraryKey: libraryKey)
-        if let scanned = entry.series { series.append(scanned) }
+        if let scanned = entry.series {
+          archiveSeries.append(scanned)
+        }
+        archiveChapters += entry.chapters
         cache[key] = entry
       }
     }
 
     ScanCache.save(cache, libraryKey: libraryKey)
-    return ScanReport(series: series, errors: errors, isComplete: isComplete)
+    return LibraryScanner.assembleLibrary(
+      dirs: dirs, archiveChapters: archiveChapters, archiveSeries: archiveSeries,
+      libraryKey: libraryKey, libraryName: libraryName,
+      layout: layout, errors: errors, isComplete: isComplete
+    )
   }
 
-  private static func scanSeriesFolder(
+  /// 判定根子目录形状（结构对齐 Cloud189Scanner.scanRootDirectory）：
+  /// volume = 直接装着图片/包；wrapper = 子项全是「直接装媒体」的文件夹（卷壳）；series = 其余。
+  private static func classifyWebDAVDir(
     client: WebDAVClient, folder: WebDAVItem, libraryKey: String,
     previousPages: [String: CachedFolderPages], mode: LibraryScanMode
   ) async -> CachedChildScan? {
-    await ReaderActivity.waitWhileReading()
     guard let children = try? await client.list(folder.url) else { return nil }
 
     var pageCache: [String: CachedFolderPages] = [:]
-    var chapters: [ScannedChapter] = []
-    var looseImages = 0
     var complete = true
+    var kind = "series"
+    var wrapperChapters: [ScannedChapter] = []
 
-    for child in children {
-      await ReaderActivity.waitWhileReading()
-      if child.isDirectory {
-        // 散图子文件夹 = 一话（页数有缓存就不再列目录）
-        guard let count = await imageCount(
-          client: client, folder: child, previous: previousPages, cache: &pageCache, mode: mode
-        ) else {
-          complete = false
-          continue
+    let hasDirectMedia = children.contains { !$0.isDirectory && ($0.isImage || $0.isArchive || $0.isPDF) }
+    if hasDirectMedia {
+      kind = "volume"
+    } else {
+      let subDirs = children.filter(\.isDirectory)
+      if !subDirs.isEmpty, subDirs.count == children.count {
+        var allMedia = true
+        for sub in subDirs {
+          await ReaderActivity.waitWhileReading()
+          guard let stats = await imageStats(
+            client: client, folder: sub, previous: previousPages, cache: &pageCache, mode: mode
+          ) else {
+            complete = false
+            allMedia = false
+            break
+          }
+          guard stats.hasMedia else { allMedia = false; break }
+          wrapperChapters.append(makeChapter(item: sub, kind: "folder", pages: stats.pageCount))
         }
-        if count > 0 {
-          chapters.append(makeChapter(item: child, kind: "folder", pages: count))
-        }
-      } else if child.isImage {
-        looseImages += 1
-      } else if child.isArchive || child.isPDF {
-        chapters.append(makeChapter(item: child, kind: child.isPDF ? "pdf" : "zip", pages: 0))
+        if allMedia { kind = "wrapper" }
       }
     }
 
-    if chapters.isEmpty && looseImages > 0 {
-      chapters.append(makeChapter(item: folder, kind: "folder", pages: looseImages))
+    var chapters: [ScannedChapter] = []
+    switch kind {
+    case "volume":
+      chapters = [makeChapter(item: folder, kind: "folder", pages: 0)]
+    case "wrapper":
+      chapters = wrapperChapters.sorted { naturalCompare($0.title, $1.title) }
+    default:
+      break
     }
 
-    let scanned = chapters.isEmpty ? nil : ScannedSeries(
-      key: "\(libraryKey)/\(folder.name)",
-      title: folder.name,
-      chapters: LibraryScanner.sortChapters(chapters)
+    // series 拆解（multi 布局用；single 布局也复用它的章节列表）
+    let (series, seriesComplete) = await scanSeriesContent(
+      client: client, folder: folder, children: children, libraryKey: libraryKey,
+      previousPages: previousPages, cache: &pageCache, mode: mode
     )
+    if !seriesComplete { complete = false }
+
     return CachedChildScan(
       fingerprint: fingerprint(of: folder),
-      kind: "series",
-      series: scanned,
+      kind: kind,
+      series: series,
       chapters: chapters,
       folderPages: pageCache,
       complete: complete,
@@ -124,26 +139,69 @@ nonisolated enum WebDAVScanner {
     )
   }
 
-  /// 散图子目录的图片数：目录指纹没变就复用上次结果，省掉一次 PROPFIND。
-  private static func imageCount(
+  /// 系列内容拆解（子文件夹/包 = 话；纯散图整目录一话）。children 由调用方传入，避免重复列目录。
+  private static func scanSeriesContent(
+    client: WebDAVClient, folder: WebDAVItem, children: [WebDAVItem], libraryKey: String,
+    previousPages: [String: CachedFolderPages],
+    cache: inout [String: CachedFolderPages], mode: LibraryScanMode
+  ) async -> (ScannedSeries?, Bool) {
+    var chapters: [ScannedChapter] = []
+    var complete = true
+
+    for child in children {
+      await ReaderActivity.waitWhileReading()
+      if child.isDirectory {
+        guard let stats = await imageStats(
+          client: client, folder: child, previous: previousPages, cache: &cache, mode: mode
+        ) else {
+          complete = false
+          continue
+        }
+        if stats.pageCount > 0 {
+          chapters.append(makeChapter(item: child, kind: "folder", pages: stats.pageCount))
+        }
+      } else if child.isArchive || child.isPDF {
+        chapters.append(makeChapter(item: child, kind: child.isPDF ? "pdf" : "zip", pages: 0))
+      }
+    }
+
+    // 纯散图系列：整个文件夹就是一话；散图与章节共存时，明显的散图内容（≥3 张）也补一章
+    let looseImages = children.filter(\.isImage).count
+    if looseImages > 0 && (chapters.isEmpty || looseImages >= 3) {
+      chapters.append(makeChapter(item: folder, kind: "folder", pages: looseImages))
+    }
+
+    guard !chapters.isEmpty else { return (nil, complete) }
+    return (
+      ScannedSeries(
+        key: "\(libraryKey)/\(folder.name)",
+        title: folder.name,
+        chapters: LibraryScanner.sortChapters(chapters)
+      ),
+      complete
+    )
+  }
+
+  /// 散图子目录的统计（页数 + 是否直接装媒体）：目录指纹没变就复用上次结果，省掉一次 PROPFIND。
+  private static func imageStats(
     client: WebDAVClient, folder: WebDAVItem,
     previous: [String: CachedFolderPages], cache: inout [String: CachedFolderPages], mode: LibraryScanMode
-  ) async -> Int? {
+  ) async -> CachedFolderPages? {
     let key = folder.url.absoluteString
     let fingerprint = fingerprint(of: folder)
     if mode == .incremental, folder.lastModified != nil,
        let cached = previous[key], cached.fingerprint == fingerprint {
       cache[key] = cached
-      return cached.pageCount
+      return cached
     }
     guard let inner = try? await client.list(folder.url) else { return nil }
-    let count = inner.filter(\.isImage).count
-    cache[key] = CachedFolderPages(
+    let stats = CachedFolderPages(
       fingerprint: fingerprint,
-      pageCount: count,
+      pageCount: inner.filter(\.isImage).count,
       hasMedia: inner.contains { !$0.isDirectory && ($0.isImage || $0.isArchive || $0.isPDF) }
     )
-    return count
+    cache[key] = stats
+    return stats
   }
 
   private static func fingerprint(of item: WebDAVItem) -> String {

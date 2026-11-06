@@ -215,6 +215,12 @@ extension LibraryEntity {
   }
 }
 
+extension SourceEntity {
+  var sourceIcon: String {
+    kind == "cloud189" ? "cloud.fill" : "externaldrive.connected.to.line.below"
+  }
+}
+
 extension Queries.ShelfStatus {
   var label: String {
     switch self {

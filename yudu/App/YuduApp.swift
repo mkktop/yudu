@@ -13,7 +13,9 @@ struct YuduApp: App {
     let (madeContainer, notice) = Self.makeContainer()
     container = madeContainer
     storageNotice = notice
-    _libraryService = State(initialValue: LibraryService(container: madeContainer))
+    let service = LibraryService(container: madeContainer)
+    service.migrateSourcesIfNeeded()
+    _libraryService = State(initialValue: service)
   }
 
   var body: some Scene {
@@ -32,7 +34,7 @@ struct YuduApp: App {
     do {
       return (
         try ModelContainer(
-          for: LibraryEntity.self, SeriesEntity.self, ChapterEntity.self,
+          for: SourceEntity.self, LibraryEntity.self, SeriesEntity.self, ChapterEntity.self,
           ProgressEntity.self, ReadingLogEntity.self
         ),
         nil
@@ -51,7 +53,7 @@ struct YuduApp: App {
           }
         }
         if let rebuilt = try? ModelContainer(
-          for: LibraryEntity.self, SeriesEntity.self, ChapterEntity.self,
+          for: SourceEntity.self, LibraryEntity.self, SeriesEntity.self, ChapterEntity.self,
           ProgressEntity.self, ReadingLogEntity.self
         ) {
           return (rebuilt, "本地数据库损坏，已自动重建；旧数据备份在 App 沙盒内。")
@@ -59,7 +61,7 @@ struct YuduApp: App {
       }
       let inMemory = ModelConfiguration(isStoredInMemoryOnly: true)
       if let fallback = try? ModelContainer(
-        for: LibraryEntity.self, SeriesEntity.self, ChapterEntity.self,
+        for: SourceEntity.self, LibraryEntity.self, SeriesEntity.self, ChapterEntity.self,
         ProgressEntity.self, ReadingLogEntity.self,
         configurations: inMemory
       ) {

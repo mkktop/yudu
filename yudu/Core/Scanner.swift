@@ -28,15 +28,31 @@ struct ScanReport {
   var isComplete: Bool = true
 }
 
+/// 书库目录结构：multi = 每个子文件夹是一部漫画（默认，经典库结构）；
+/// single = 整个文件夹是一部漫画（子文件夹/压缩包都是话）。由用户在导入时选择，可随时改。
+enum LibraryScanLayout: String, Codable, Sendable {
+  case multi
+  case single
+}
+
+/// 书库根子目录的形状判定（三种扫描器共用）：kind = volume | wrapper | series
+struct ClassifiedChild {
+  var kind: String
+  /// multi 布局下的系列（series 形状才有；volume/wrapper 形状为 nil）
+  var series: ScannedSeries?
+  /// single 布局下的章节（volume = 目录本身；wrapper = 各卷；series = 它拆出的章节）
+  var chapters: [ScannedChapter]
+}
+
 // MARK: - 扫描器（跑在后台执行器）
 
-/// 规则与桌面版一致：库根目录的子文件夹 = 系列；根目录散装压缩包/PDF = 单文件系列；
+/// 基础规则：库根目录的子文件夹 = 系列；根目录散装压缩包/PDF = 单文件系列；
 /// 系列内的压缩包 / 散图子文件夹 = 话；系列根只有散图时整个文件夹算一话。
+/// 目录结构（单部/多部）按 LibraryScanLayout 装配，见 assembleLibrary。
 /// chapters 顺序即 sortIndex 顺序（有话号按话号升序在前，无话号自然序在后）。
 nonisolated enum LibraryScanner {
 
-  static func scanLibraryRoot(root: URL) -> ScanReport {
-    var series: [ScannedSeries] = []
+  static func scanLibraryRoot(root: URL, layout: LibraryScanLayout = .multi) -> ScanReport {
     var errors: [String] = []
     var isComplete = true
 
@@ -47,27 +63,88 @@ nonisolated enum LibraryScanner {
       return ScanReport(series: [], errors: ["无法读取目录：\(root.path)"], isComplete: false)
     }
 
+    var dirs: [(name: String, child: ClassifiedChild?)] = []
+    var archiveChapters: [ScannedChapter] = []
+    var archiveSeries: [ScannedSeries] = []
     for child in children.sorted(by: { naturalCompare($0.lastPathComponent, $1.lastPathComponent) }) {
       let isDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
       if isDir {
-        switch scanSeriesFolderResult(child, libraryKey: root.path) {
-        case .series(let scanned):
-          series.append(scanned)
-        case .empty:
-          break
-        case .unreadable(let name):
-          errors.append("无法读取文件夹：\(name)")
+        if let classified = classifyLocalDir(child, libraryKey: root.path) {
+          dirs.append((child.lastPathComponent, classified))
+        } else {
+          dirs.append((child.lastPathComponent, nil))
+          errors.append("无法读取文件夹：\(child.lastPathComponent)")
           isComplete = false
         }
       } else if MediaSniff.isArchive(child.lastPathComponent) || MediaSniff.isPDF(child.lastPathComponent) {
         if let s = scanSingleFile(child, libraryKey: root.path) {
-          series.append(s)
+          archiveSeries.append(s)
+          archiveChapters.append(s.chapters[0])
         } else {
           errors.append("无法读取：\(child.lastPathComponent)")
           isComplete = false
         }
       }
       // 其他类型文件忽略
+    }
+    return assembleLibrary(
+      dirs: dirs, archiveChapters: archiveChapters, archiveSeries: archiveSeries,
+      libraryKey: root.path, libraryName: root.lastPathComponent,
+      layout: layout, errors: errors, isComplete: isComplete
+    )
+  }
+
+  /// 根子目录拆解：三种布局形状（volume=直接装图/包、wrapper=子目录全是卷、series=话/包混装）
+  /// 都由 scanSeriesFolderResult 统一拆出「系列 + 章节」——multi 布局下每个子目录仍是一部漫画
+  /// （直装图片的文件夹 = 单章节系列），single 布局则复用其章节做整库合并。
+  private static func classifyLocalDir(_ folder: URL, libraryKey: String) -> ClassifiedChild? {
+    switch scanSeriesFolderResult(folder, libraryKey: libraryKey) {
+    case .series(let scanned):
+      return ClassifiedChild(kind: "series", series: scanned, chapters: scanned.chapters)
+    case .empty:
+      return ClassifiedChild(kind: "series", series: nil, chapters: [])
+    case .unreadable:
+      return nil
+    }
+  }
+
+  /// 按布局装配扫描结果（三种扫描器共用）：
+  /// multi = 每个子目录一部漫画（散包各成单文件系列）；
+  /// single = 整库一部漫画（子目录卷/话、卷壳展开、根散包全部合并成章节）。
+  static func assembleLibrary(
+    dirs: [(name: String, child: ClassifiedChild?)],
+    archiveChapters: [ScannedChapter],
+    archiveSeries: [ScannedSeries],
+    libraryKey: String,
+    libraryName: String,
+    layout: LibraryScanLayout,
+    errors: [String],
+    isComplete: Bool
+  ) -> ScanReport {
+    var errors = errors
+    if layout == .single {
+      var chapters = archiveChapters
+      for dir in dirs {
+        guard let child = dir.child else { continue } // 读取失败的目录调用方已报错
+        chapters += child.series?.chapters ?? child.chapters
+      }
+      if !chapters.isEmpty {
+        return ScanReport(
+          series: [ScannedSeries(key: libraryKey, title: libraryName, chapters: sortChapters(chapters))],
+          errors: errors, isComplete: isComplete
+        )
+      }
+      return ScanReport(series: [], errors: errors, isComplete: isComplete)
+    }
+
+    var series = archiveSeries
+    for dir in dirs {
+      guard let child = dir.child else { continue }
+      if let scanned = child.series {
+        series.append(scanned)
+      } else {
+        errors.append("目录无内容：\(dir.name)")
+      }
     }
     return ScanReport(series: series, errors: errors, isComplete: isComplete)
   }
@@ -123,8 +200,9 @@ nonisolated enum LibraryScanner {
       }
     }
 
-    // 整个文件夹就是一话（纯散图系列）
-    if chapters.isEmpty && looseImages > 0 {
+    // 纯散图系列：整个文件夹就是一话；散图与章节共存时，明显的散图内容（≥3 张）也补一章，
+    // 零星几张贴图（如封面）不补，避免垃圾章节
+    if looseImages > 0 && (chapters.isEmpty || looseImages >= 3) {
       chapters.append(makeChapter(url: folder, kind: "folder", pages: looseImages))
     }
 

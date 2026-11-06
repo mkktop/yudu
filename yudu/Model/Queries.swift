@@ -71,7 +71,8 @@ struct EffectivePrefs {
 // MARK: - 阅读器用的轻量值类型（避免跨线程持有模型对象）
 
 struct ChapterRef: Identifiable, Equatable, Hashable {
-  var id: PersistentIdentifier
+  /// 章节唯一键（挂载章节 = path；浏览器试读章节也是合成 path，不依赖 SwiftData）
+  var id: String
   var path: String
   var title: String
   var kind: String
@@ -106,7 +107,7 @@ enum Queries {
   static func chaptersRef(_ series: SeriesEntity) -> [ChapterRef] {
     orderedChapters(series).map { ch in
       ChapterRef(
-        id: ch.persistentModelID,
+        id: ch.path,
         path: ch.path,
         title: ch.title,
         kind: ch.kind,
@@ -121,7 +122,7 @@ enum Queries {
 
   static func ref(_ chapter: ChapterEntity) -> ChapterRef {
     ChapterRef(
-      id: chapter.persistentModelID,
+      id: chapter.path,
       path: chapter.path,
       title: chapter.title,
       kind: chapter.kind,

@@ -112,7 +112,7 @@ struct BookshelfView: View {
         switch route {
         case .series(let series): SeriesDetailView(series: series)
         case .reader(let series, let chapter, let token):
-          ReaderView(series: series, startChapter: chapter, token: token)
+          ReaderView(series: series, startChapter: chapter, preview: nil, token: token)
         }
       }
       .onChange(of: libraries.map(\.key)) { _, keys in

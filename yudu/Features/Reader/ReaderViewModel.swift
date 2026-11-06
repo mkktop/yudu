@@ -8,7 +8,11 @@ import Observation
 final class ReaderViewModel {
 
   // 输入
-  private let series: SeriesEntity
+  /// nil = 网盘浏览器试读（未挂载章节）：不落进度、不落偏好
+  private let series: SeriesEntity?
+  /// 试读模式预解析好的客户端（挂载模式按 series.library 现查）
+  private let previewWebDAV: WebDAVClient?
+  private let previewCloud189: Cloud189Client?
   private let context: ModelContext
   private let libraryService: LibraryService
 
@@ -32,8 +36,10 @@ final class ReaderViewModel {
   // 界面
   var chromeVisible = true
   var showDirectionHint = false
-  /// 条漫页尺寸（渐进加载）
-  private(set) var dims: [Int: CGSize] = [:]
+  /// 条漫页尺寸（渐进加载）。
+  /// ObservationIgnored：尺寸字典一变就全体条漫行重渲染是滚动卡顿源，
+  /// 行高改为条漫行本地 aspect（init 播种 + 本行探测回调 / 解码回填），字典只喂布局换算与持久化。
+  @ObservationIgnored private(set) var dims: [Int: CGSize] = [:]
   var dimsReadyThrough = -1
   /// 条漫恢复进度中
   var restoringScroll = false
@@ -56,8 +62,6 @@ final class ReaderViewModel {
 
   var isPDF: Bool { current?.isPDF ?? false }
   var effectiveMode: ReaderMode { isPDF ? .webtoon : prefs.mode }
-  /// 云端页源：预取更保守，尺寸探测只读图头
-  var isRemoteSource: Bool { source?.isRemote ?? false }
 
   var prevChapter: ChapterRef? {
     chapters.indices.contains(currentIndex - 1) ? chapters[currentIndex - 1] : nil
@@ -69,6 +73,8 @@ final class ReaderViewModel {
 
   init(series: SeriesEntity, startChapter: ChapterEntity?, context: ModelContext, libraryService: LibraryService) {
     self.series = series
+    self.previewWebDAV = nil
+    self.previewCloud189 = nil
     self.context = context
     self.libraryService = libraryService
     self.prefs = Queries.prefs(for: series)
@@ -86,6 +92,25 @@ final class ReaderViewModel {
     if let target, let idx = refs.firstIndex(where: { $0.path == target.path }) {
       currentIndex = idx
       initialResume = Queries.resumePage(target)
+    }
+  }
+
+  /// 网盘浏览器试读：直接驱动阅读管线，不经过任何挂载书库（无进度、无偏好持久化）
+  init(
+    previewChapters: [ChapterRef], index: Int,
+    webdavClient: WebDAVClient?, cloud189Client: Cloud189Client?,
+    context: ModelContext, libraryService: LibraryService
+  ) {
+    self.series = nil
+    self.previewWebDAV = webdavClient
+    self.previewCloud189 = cloud189Client
+    self.context = context
+    self.libraryService = libraryService
+    let defaults = ReaderDefaults.load()
+    self.prefs = EffectivePrefs(mode: defaults.mode, rtl: defaults.rtl, fit: defaults.fit)
+    self.chapters = previewChapters
+    if previewChapters.indices.contains(index) {
+      currentIndex = index
     }
   }
 
@@ -125,7 +150,7 @@ final class ReaderViewModel {
   }
 
   private var chapterEntity: ChapterEntity? {
-    series.chapters.first { $0.path == current?.path }
+    series?.chapters.first { $0.path == current?.path }
   }
 
   // MARK: - 打开章节
@@ -170,16 +195,23 @@ final class ReaderViewModel {
     opened = nil
     source = nil
 
-    let root = libraryService.libraryRoot(for: series)
-    let webdavClient: WebDAVClient? = series.library?.kind == "webdav"
-      ? libraryService.webdavClient(forLibrary: series.library!)
-      : nil
-    let cloud189Client: Cloud189Client? = series.library?.kind == "cloud189" && series.library != nil
-      ? libraryService.cloud189Client(forLibrary: series.library!)
-      : nil
+    let root = series.flatMap { libraryService.libraryRoot(for: $0) }
+    let webdavClient: WebDAVClient?
+    let cloud189Client: Cloud189Client?
+    if let series {
+      webdavClient = series.library?.kind == "webdav"
+        ? libraryService.webdavClient(forLibrary: series.library!)
+        : nil
+      cloud189Client = series.library?.kind == "cloud189"
+        ? libraryService.cloud189Client(forLibrary: series.library!)
+        : nil
+    } else {
+      webdavClient = previewWebDAV
+      cloud189Client = previewCloud189
+    }
     let opened = await PageSourceFactory.open(
       chapterPath: ref.path, kind: ref.kind, libraryRoot: root,
-      seriesKey: series.key, webdavClient: webdavClient, cloud189Client: cloud189Client,
+      seriesKey: ref.seriesKey, webdavClient: webdavClient, cloud189Client: cloud189Client,
       contentVersion: ref.cacheVersion
     )
     guard epoch == openEpoch, !Task.isCancelled else {
@@ -277,7 +309,8 @@ final class ReaderViewModel {
   }
 
   /// 条漫页项滚到附近时按需取尺寸，不阻塞主线程；远程源只读图头。
-  func requestDims(for index: Int) {
+  /// onDims 在主线程回调本页尺寸，供条漫行先改行高（避免解码完成后跳变）。
+  func requestDims(for index: Int, onDims: ((CGSize) -> Void)? = nil) {
     guard index >= 0, index < pageCount, dims[index] == nil,
           !dimsRequests.contains(index), let source = self.source else { return }
     dimsRequests.insert(index)
@@ -292,6 +325,7 @@ final class ReaderViewModel {
         if let value {
           self.dims[index] = value
           self.scheduleDimsSave()
+          onDims?(value)
         }
       }
     }
@@ -374,7 +408,7 @@ final class ReaderViewModel {
   /// 末页会被 writeProgress 当成“已读完”，用户只是返回就会被误标完成。
   func goToPreviousChapter() async {
     guard let previous = prevChapter else { return }
-    let entity = series.chapters.first { $0.path == previous.path }
+    let entity = series?.chapters.first { $0.path == previous.path }
     let landing = entity.map { Queries.resumePage($0) } ?? 0
     await goToChapter(offset: -1, landing: landing)
   }
@@ -384,32 +418,30 @@ final class ReaderViewModel {
     flushProgress()
     openTask?.cancel()
     currentIndex = index
-    let landing = series.chapters.first { $0.path == ref.path }.map { Queries.resumePage($0) } ?? 0
+    let landing = series?.chapters.first { $0.path == ref.path }.map { Queries.resumePage($0) } ?? 0
     await openCurrent(resume: landing)
   }
 
   // MARK: - 预取
 
-  /// 预取策略按源类型区分：
-  /// - 云端单页：只提前 1 页，且尺寸与前台一致（命中缓存后不用重下 40MB）
-  /// - 本地单页：预取 2048 预览，前台再升级 4096
-  /// - 条漫：云端只 1 页，本地前后各 2 页
-  /// 顺序始终是「下一页优先」；云端先让当前页下载 250ms。
+  /// 预取与前台同一把钥匙：全部原图解码（maxPixel 0），
+  /// 正常翻页直接命中已解码缓存秒开，不存在"预览 → 大图"二次解码。
+  /// - 云端：向前 3 页（网络延迟比解码慢一个量级，最需要预取；
+  ///   顺序阅读时预下的页反正都要读，不浪费流量）
+  /// - 本地单页：下一页最优先，随后 +2、上一页、+3——连翻快时深页会被取消跳过，
+  ///   停留阅读时才铺开（用空闲解码能力换前向流畅）
+  /// - 本地条漫：向前 4 页（竖滚消耗快），回滚保留 1 页
   private func prefetch(around index: Int) {
     prefetchTask?.cancel()
     guard let source, pageCount > 0 else { return }
     let remote = source.isRemote
-    let maxPixel: Int
     let order: [Int]
-    if effectiveMode == .webtoon {
-      maxPixel = 2048
-      order = remote ? [index + 1] : [index + 1, index + 2, index - 1, index - 2]
-    } else if remote {
-      maxPixel = 4096
-      order = [index + 1]
+    if remote {
+      order = [index + 1, index + 2, index + 3]
+    } else if effectiveMode == .webtoon {
+      order = [index + 1, index + 2, index + 3, index + 4, index - 1]
     } else {
-      maxPixel = 2048
-      order = [index + 1, index + 2, index - 1]
+      order = [index + 1, index + 2, index - 1, index + 3]
     }
     let indices = order.filter { $0 >= 0 && $0 < pageCount }
     guard !indices.isEmpty else { return }
@@ -417,15 +449,21 @@ final class ReaderViewModel {
     let sid = sourceID
     prefetchTask = Task.detached(priority: .utility) {
       if remote {
-        try? await Task.sleep(for: .milliseconds(250))
+        // 当前页没缓存好之前不抢带宽（最多等 2.5 秒）：
+        // 慢网下预取和正在看的页抢同一条管道，先保住落地页
+        for _ in 0..<25 {
+          if Task.isCancelled { return }
+          if PageCache.shared.cached(sourceID: sid, index: index, maxPixel: 0) != nil { break }
+          try? await Task.sleep(for: .milliseconds(100))
+        }
         guard !Task.isCancelled else { return }
       }
       for i in indices {
         if Task.isCancelled { return }
         _ = await PageCache.shared.image(
-          sourceID: sid, index: i, maxPixel: maxPixel, priority: .utility
+          sourceID: sid, index: i, maxPixel: 0, priority: .utility
         ) {
-          sourceBox.pageImage(at: i, maxPixel: CGFloat(maxPixel))
+          sourceBox.pageImage(at: i, maxPixel: 0)
         }
       }
     }
@@ -455,7 +493,7 @@ final class ReaderViewModel {
   func setMode(_ mode: ReaderMode) {
     guard !isPDF else { return }
     prefs.mode = mode
-    Queries.savePrefs(seriesKey: series.key, mode: mode)
+    if let series { Queries.savePrefs(seriesKey: series.key, mode: mode) }
     if mode == .webtoon {
       startDimsProbe(around: page)
       if page > 0 { restoringScroll = true }
@@ -469,7 +507,7 @@ final class ReaderViewModel {
   func setRTL(_ rtl: Bool) {
     guard !isPDF else { return }
     prefs.rtl = rtl
-    Queries.savePrefs(seriesKey: series.key, rtl: rtl)
+    if let series { Queries.savePrefs(seriesKey: series.key, rtl: rtl) }
     showDirectionHint = true
     hintTask?.cancel()
     hintTask = Task {
@@ -481,7 +519,7 @@ final class ReaderViewModel {
   func setFit(_ fit: ReaderFit) {
     guard !isPDF else { return }
     prefs.fit = fit
-    Queries.savePrefs(seriesKey: series.key, fit: fit)
+    if let series { Queries.savePrefs(seriesKey: series.key, fit: fit) }
   }
 
   // MARK: - 界面
@@ -504,22 +542,14 @@ final class ReaderViewModel {
     restoringScroll = false
   }
 
-  /// 条漫当前页上报（视口中线所在页）；恢复进度期间不覆盖页码
-  func reportVisibleFrames(_ frames: [Int: CGRect], viewportHeight: CGFloat) {
-    guard !restoringScroll else { return }
-    let mid = viewportHeight / 2
-    var best: (index: Int, distance: CGFloat)?
-    for (index, frame) in frames {
-      let d = abs(frame.midY - mid)
-      if best == nil || d < best!.distance {
-        best = (index, d)
-      }
-    }
-    if let best, best.index != page {
-      let clamped = pageCount > 0 ? min(max(best.index, 0), pageCount - 1) : best.index
-      page = clamped
-      scheduleProgressWrite()
-      prefetch(around: clamped)
-    }
+  /// 条漫滚动上报当前页（视口中线所在页，由 onScrollGeometryChange 在跨页时触发）；
+  /// 恢复进度期间不覆盖页码
+  func reportScrollPage(_ index: Int) {
+    guard !restoringScroll, pageCount > 0 else { return }
+    let clamped = min(max(index, 0), pageCount - 1)
+    guard clamped != page else { return }
+    page = clamped
+    scheduleProgressWrite()
+    prefetch(around: clamped)
   }
 }

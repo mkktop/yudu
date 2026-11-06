@@ -2,10 +2,20 @@ import SwiftUI
 import SwiftData
 
 struct ReaderView: View {
-  let series: SeriesEntity
+  /// nil = 浏览器试读（preview 输入驱动），不进书架、不落进度
+  let series: SeriesEntity?
   let startChapter: ChapterEntity?
+  /// 试读会话：同一目录内可连读的章节列表 + 预解析客户端
+  let preview: PreviewInput?
   /// 每次进入生成新值；task(id:) 据此重建阅读会话（视图复用时也能响应）
   let token: UUID
+
+  struct PreviewInput {
+    let chapters: [ChapterRef]
+    let index: Int
+    let webdavClient: WebDAVClient?
+    let cloud189Client: Cloud189Client?
+  }
 
   @Environment(\.modelContext) private var context
   @Environment(\.dismiss) private var dismiss
@@ -39,9 +49,20 @@ struct ReaderView: View {
     .onAppear { ReaderActivity.begin() }
     .task(id: token) {
       vm?.stop()
-      let model = ReaderViewModel(
-        series: series, startChapter: startChapter, context: context, libraryService: libraryService
-      )
+      let model: ReaderViewModel
+      if let preview {
+        model = ReaderViewModel(
+          previewChapters: preview.chapters, index: preview.index,
+          webdavClient: preview.webdavClient, cloud189Client: preview.cloud189Client,
+          context: context, libraryService: libraryService
+        )
+      } else if let series {
+        model = ReaderViewModel(
+          series: series, startChapter: startChapter, context: context, libraryService: libraryService
+        )
+      } else {
+        return
+      }
       vm = model
       #if DEBUG
       ReaderProbe.currentViewModel = model
@@ -100,7 +121,6 @@ struct ReaderView: View {
         fit: vm.prefs.fit,
         source: source,
         sourceID: vm.sourceID,
-        isRemote: vm.isRemoteSource,
         onPageChanged: { vm.setPage($0) },
         onPageSize: { index, size in vm.recordPageSize(index: index, size: size) },
         onTapSide: { side in
@@ -194,7 +214,7 @@ struct ReaderView: View {
         chromeCircle("chevron.left", compact: compact)
       }.accessibilityLabel("退出阅读")
       VStack(alignment: .leading, spacing: compact ? 1 : 5) {
-        Text(vm.current?.seriesTitle ?? series.title)
+        Text(vm.current?.seriesTitle ?? series?.title ?? "")
           .font(compact ? .caption2 : .caption).foregroundStyle(YuduTheme.muted).lineLimit(1)
         Text(vm.current?.title ?? "正在打开…")
           .font(compact ? .footnote.weight(.medium) : .subheadline.weight(.medium))
@@ -488,7 +508,7 @@ struct ReaderView: View {
   // MARK: - 目录
 
   private struct TOCSheet: View {
-    let series: SeriesEntity
+    let series: SeriesEntity?
     let vm: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
 
@@ -535,7 +555,7 @@ struct ReaderView: View {
     }
 
     private var entitiesByPath: [String: ChapterEntity] {
-      Dictionary(series.chapters.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+      Dictionary((series?.chapters ?? []).map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     @ViewBuilder

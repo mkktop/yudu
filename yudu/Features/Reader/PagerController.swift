@@ -18,8 +18,6 @@ struct ReaderPager: UIViewControllerRepresentable {
   var fit: ReaderFit
   var source: any PageSource
   var sourceID: String
-  /// 云端源不先解预览：避免为预览再下载一次整页大图
-  var isRemote: Bool
   var onPageChanged: (Int) -> Void
   var onPageSize: ((Int, CGSize) -> Void)?
   var onTapSide: (PagerTapSide) -> Void
@@ -49,6 +47,8 @@ struct ReaderPager: UIViewControllerRepresentable {
       _ pageViewController: UIPageViewController,
       viewControllerBefore viewController: UIViewController
     ) -> UIViewController? {
+      // 交互式滑动开始取邻页：标记过渡中，邻页新解码的大图先扣住不上屏
+      controller?.beginSwipeTransition()
       guard let pageVC = viewController as? PageZoomVC else { return nil }
       return controller?.makePage(at: pageVC.displayIndex - 1)
     }
@@ -57,6 +57,7 @@ struct ReaderPager: UIViewControllerRepresentable {
       _ pageViewController: UIPageViewController,
       viewControllerAfter viewController: UIViewController
     ) -> UIViewController? {
+      controller?.beginSwipeTransition()
       guard let pageVC = viewController as? PageZoomVC else { return nil }
       return controller?.makePage(at: pageVC.displayIndex + 1)
     }
@@ -67,6 +68,8 @@ struct ReaderPager: UIViewControllerRepresentable {
       previousViewControllers: [UIViewController],
       transitionCompleted completed: Bool
     ) {
+      // 取消的滑动也要清过渡标记并让扣住的图落地
+      controller?.endSwipeTransition()
       guard completed,
             let props = parent,
             let visible = pageViewController.viewControllers?.first as? PageZoomVC
@@ -85,6 +88,22 @@ final class PagerController: UIViewController {
 
   private var pager: UIPageViewController!
   private var props: ReaderPager?
+
+  /// 交互式滑动翻页进行中（手势开始取邻页 → didFinishAnimating 落定）。
+  /// 期间新解码的整页大图先扣住，落定再上屏，避免在滑动动画中提交大位图造成掉帧。
+  private(set) var isSwipeTransitioning = false
+
+  func beginSwipeTransition() {
+    isSwipeTransitioning = true
+  }
+
+  func endSwipeTransition() {
+    guard isSwipeTransitioning else { return }
+    isSwipeTransitioning = false
+    for case let page as PageZoomVC in pager.viewControllers ?? [] {
+      page.flushPendingLanding()
+    }
+  }
 
   override func viewDidLoad() {
     super.viewDidLoad()
@@ -120,12 +139,12 @@ final class PagerController: UIViewController {
     guard displayIndex >= 0, displayIndex < props.pageCount else { return nil }
     let reading = props.rtl ? props.pageCount - 1 - displayIndex : displayIndex
     let vc = PageZoomVC(displayIndex: displayIndex)
+    vc.swipeGate = { [weak self] in self?.isSwipeTransitioning ?? false }
     vc.configure(
       readingIndex: reading,
       source: props.source,
       sourceID: props.sourceID,
-      fit: props.fit,
-      isRemote: props.isRemote
+      fit: props.fit
     ) { size in
       props.onPageSize?(reading, size)
     } onTap: { [weak self] side in
@@ -188,17 +207,21 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
   private let scrollView = UIScrollView()
   private let imageView = UIImageView()
   private let retryButton = UIButton(type: .system)
+  private let spinner = UIActivityIndicatorView(style: .large)
   private var tapHandler: ((PagerTapSide) -> Void)?
   private var onSize: ((CGSize) -> Void)?
   private var source: (any PageSource)?
   private var sourceID: String = ""
   private var readingIndex: Int = 0
-  private var isRemote = false
   private var loadTask: Task<Void, Never>?
   private var baseScale: CGFloat = 1
   private var lastLayoutSize: CGSize = .zero
   /// 图片到达时布局宽高还是 0（缓存命中极快/预加载页），等下一轮布局补适配
   private var needsInitialLayout = false
+  /// 滑动过渡是否进行中（由 PagerController 注入，图片落地前询问）
+  var swipeGate: (() -> Bool)?
+  /// 滑动过渡中解码完成的整页大图：先扣住，落定再上屏（避免动画中提交大位图掉帧）
+  private var pendingImage: UIImage?
 
   init(displayIndex: Int) {
     self.displayIndex = displayIndex
@@ -213,7 +236,6 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     source: any PageSource,
     sourceID: String,
     fit: ReaderFit,
-    isRemote: Bool,
     onSize: @escaping (CGSize) -> Void,
     onTap: @escaping (PagerTapSide) -> Void
   ) {
@@ -221,7 +243,6 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     self.source = source
     self.sourceID = sourceID
     self.fit = fit
-    self.isRemote = isRemote
     self.onSize = onSize
     self.tapHandler = onTap
   }
@@ -251,6 +272,11 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     retryButton.addTarget(self, action: #selector(retryLoad), for: .touchUpInside)
     view.addSubview(retryButton)
 
+    // 原图解码比小图慢一点：缓存未命中时给个加载反馈
+    spinner.color = .white.withAlphaComponent(0.6)
+    spinner.hidesWhenStopped = true
+    view.addSubview(spinner)
+
     // 手势挂在 scrollView 而不是 imageView 上：整页适配时上下/左右有大片黑边，
     // 图片外的点击也要能翻页和收起菜单（挂在图片上时点黑边完全没反应）。
     let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
@@ -273,6 +299,12 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     loadTask = nil
   }
 
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    // 兜底：任何过渡结束后成为当前页的，把扣住的图上屏
+    flushPendingLanding()
+  }
+
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     scrollView.frame = view.bounds
@@ -282,6 +314,7 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
       width: 200,
       height: 48
     )
+    spinner.center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
     // 旋转 / 分屏改变尺寸后必须按新的适宽/适高重排，否则图片停留在旧布局。
     if view.bounds.size != lastLayoutSize {
       lastLayoutSize = view.bounds.size
@@ -296,33 +329,48 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     // 预览已经在显示时也要允许强制重试整页加载
     guard force || imageView.image == nil else { return }
     retryButton.isHidden = true
+    pendingImage = nil
     let index = readingIndex
     let sourceBox = source
     let sid = sourceID
 
-    // 本地源先显示预取好的 2048 预览（秒开），再解 4096 替换；
-    // 云端源只解一次 4096，避免为预览再下载一次整页大图。
-    if !isRemote,
-       let preview = PageCache.shared.cached(sourceID: sid, index: index, maxPixel: 2048) {
-      imageView.image = preview
-      relayout()
-      onSize?(preview.size)
-    }
-
+    // 原图解码一次到位，与预取同 key：正常翻页直接命中已解码缓存（秒开且全清晰）。
+    // 预取命中的页立即上屏（滑动起步动画几乎静止，无感）；未命中页若在滑动过渡中
+    // 解码完成则先扣住，落定再上屏——大位图在动画进行中提交会掉帧。
+    let wasCached = PageCache.shared.cached(sourceID: sid, index: index, maxPixel: 0) != nil
+    spinner.startAnimating()
     loadTask = Task { [weak self] in
-      let image = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 4096) {
-        sourceBox.pageImage(at: index, maxPixel: 4096)
+      let image = await PageCache.shared.image(sourceID: sid, index: index, maxPixel: 0) {
+        sourceBox.pageImage(at: index, maxPixel: 0)
       }
       guard let self, !Task.isCancelled else { return }
       self.loadTask = nil
       if let image {
-        self.imageView.image = image
-        self.relayout()
-        self.onSize?(image.size)
+        if !wasCached, self.swipeGate?() == true {
+          self.pendingImage = image // spinner 继续转，等过渡结束 flushPendingLanding
+        } else {
+          self.spinner.stopAnimating()
+          self.land(image)
+        }
       } else {
+        self.spinner.stopAnimating()
         self.retryButton.isHidden = false
       }
     }
+  }
+
+  private func land(_ image: UIImage) {
+    imageView.image = image
+    relayout()
+    onSize?(image.size)
+  }
+
+  /// 滑动过渡结束（或成为当前页）时上屏扣住的图
+  func flushPendingLanding() {
+    guard let image = pendingImage else { return }
+    pendingImage = nil
+    spinner.stopAnimating()
+    land(image)
   }
 
   @objc private func retryLoad() {
@@ -333,7 +381,6 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     guard let image = imageView.image else { return }
     guard scrollView.bounds.width > 0, scrollView.bounds.height > 0 else {
       needsInitialLayout = true
-      Diag.log("relayout[\(displayIndex)] 布局未就绪，标记待补")
       return
     }
     needsInitialLayout = false
@@ -353,7 +400,6 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
     if scrollView.zoomScale < baseScale || scrollView.zoomScale > baseScale * 1.01 {
       scrollView.zoomScale = baseScale
     }
-    Diag.log("relayout[\(displayIndex)] fit=\(fit.rawValue) bounds=\(scrollView.bounds.size) img=\(image.size) base=\(baseScale) zoom=\(scrollView.zoomScale)")
     layoutImageView()
   }
 

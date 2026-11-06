@@ -42,7 +42,7 @@ final class LibraryService {
 
   // MARK: - 添加授权文件夹书库
 
-  func addFolderLibrary(url: URL) async -> Result<LibraryEntity, Failure> {
+  func addFolderLibrary(url: URL, layout: LibraryScanLayout = .multi) async -> Result<LibraryEntity, Failure> {
     let context = container.mainContext
     let didAccess = url.startAccessingSecurityScopedResource()
     defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
@@ -62,6 +62,7 @@ final class LibraryService {
       return lib
     }()
     library.bookmark = bookmark
+    library.scanLayout = layout
     try? context.save()
 
     await rescan(library)
@@ -126,32 +127,185 @@ final class LibraryService {
     return lib
   }
 
-  // MARK: - WebDAV
+  // MARK: - 网盘账号
 
-  /// 库对应的 WebDAV 客户端（密码从 Keychain 取）
-  func webdavClient(forLibrary library: LibraryEntity) -> WebDAVClient? {
-    guard library.kind == "webdav", let baseURL = URL(string: String(library.key.dropFirst("webdav:".count))) else {
+  /// 天翼客户端按账号缓存（会话在各自 Keychain 槽，登录向导写回同一槽）
+  private var cloud189Clients: [String: Cloud189Client] = [:]
+  /// 迁移前的全局会话兜底（旧数据尚未迁移时可用）
+  private static let legacyCloud189Shared = Cloud189Client()
+
+  func cloud189Client(for source: SourceEntity) -> Cloud189Client {
+    if let hit = cloud189Clients[source.key] { return hit }
+    let client = Cloud189Client(sessionAccount: source.sessionAccount)
+    cloud189Clients[source.key] = client
+    return client
+  }
+
+  func webdavClient(for source: SourceEntity) -> WebDAVClient? {
+    guard source.kind == "webdav", let baseURL = source.baseURL, let url = URL(string: baseURL) else {
       return nil
     }
-    let password = Keychain.get(account: library.key)
-    return WebDAVClient(baseURL: baseURL, username: library.username, password: password)
+    return WebDAVClient(baseURL: url, username: source.username, password: Keychain.get(account: source.passwordAccount))
+  }
+
+  /// 按 key 找回账号（导航路由里只带 key 的场景）
+  func source(forKey key: String) -> SourceEntity? {
+    let descriptor = FetchDescriptor<SourceEntity>(predicate: #Predicate { $0.key == key })
+    return (try? container.mainContext.fetch(descriptor).first) ?? nil
+  }
+
+  /// 当前全部挂载 key（浏览器「已导入」角标判定）
+  func mountedLibraryKeys() -> Set<String> {
+    let all = (try? container.mainContext.fetch(FetchDescriptor<LibraryEntity>())) ?? []
+    return Set(all.map(\.key))
+  }
+
+  func webdavClient(sourceKey: String) -> WebDAVClient? {
+    guard let source = source(forKey: sourceKey) else { return nil }
+    return webdavClient(for: source)
+  }
+
+  func cloud189Client(sourceKey: String) -> Cloud189Client? {
+    guard let source = source(forKey: sourceKey) else { return nil }
+    return cloud189Client(for: source)
+  }
+
+  /// 新建 WebDAV 账号：先验证连通，再落库并把密码写进账号槽
+  func createWebDAVSource(name: String, address: String, username: String?, password: String?) async -> Result<SourceEntity, Failure> {
+    guard let baseURL = WebDAVAddress.parse(address) else {
+      return .failure(Failure("地址无效，请检查服务器地址格式"))
+    }
+    let probe = WebDAVClient(baseURL: baseURL, username: username, password: password)
+    do {
+      try await probe.verify()
+    } catch {
+      return .failure(Failure(error.localizedDescription))
+    }
+    let source = SourceEntity(
+      key: UUID().uuidString, name: name.isEmpty ? defaultWebDAVName(baseURL) : name,
+      kind: "webdav", baseURL: baseURL.absoluteString, username: username
+    )
+    if let password { Keychain.set(password, account: source.passwordAccount) }
+    container.mainContext.insert(source)
+    try? container.mainContext.save()
+    return .success(source)
+  }
+
+  /// 新建未登录的天翼账号（占位）：登录向导用它的客户端登录，会话写进该账号的槽。
+  /// 用户中途取消时用 deleteSource 清掉这个空账号。
+  func createCloud189Source() -> SourceEntity {
+    let source = SourceEntity(key: UUID().uuidString, name: "天翼云盘", kind: "cloud189")
+    container.mainContext.insert(source)
+    try? container.mainContext.save()
+    _ = cloud189Client(for: source)
+    return source
+  }
+
+  /// 移除账号：级联移除其下所有文件夹书库，再清凭据与会话
+  func removeSource(_ source: SourceEntity) {
+    for library in source.libraries {
+      removeLibrary(library)
+    }
+    cloud189Clients[source.key] = nil
+    Keychain.remove(account: source.passwordAccount)
+    Keychain.remove(account: source.sessionAccount)
+    container.mainContext.delete(source)
+    try? container.mainContext.save()
+  }
+
+  private func defaultWebDAVName(_ url: URL) -> String {
+    url.lastPathComponent.isEmpty ? (url.host ?? "WebDAV") : url.lastPathComponent
+  }
+
+  /// 启动迁移：旧版「库 = 凭据」拆成「账号 + 挂载」。幂等，已迁移的库跳过。
+  /// - WebDAV 库按 (服务器地址, 用户名) 归组建账号，密码从旧槽（库 key）复制到账号槽。
+  /// - 天翼库在旧版共享一个全局会话，统一归到一个账号，会话 JSON 搬到账号槽。
+  func migrateSourcesIfNeeded() {
+    let context = container.mainContext
+    let descriptor = FetchDescriptor<LibraryEntity>()
+    let libraries = (try? context.fetch(descriptor)) ?? []
+
+    let legacy189 = libraries.filter { $0.kind == "cloud189" && $0.source == nil }
+    if !legacy189.isEmpty {
+      let nickname = legacy189.compactMap(\.username).first
+      let source = ensureSource(kind: "cloud189", baseURL: nil, username: nickname, defaultName: "天翼云盘")
+      if Keychain.get(account: source.sessionAccount) == nil,
+         let legacy = Keychain.get(account: Cloud189Client.legacySessionAccount) {
+        Keychain.set(legacy, account: source.sessionAccount)
+      }
+      cloud189Clients[source.key] = Cloud189Client(sessionAccount: source.sessionAccount)
+      for library in legacy189 { library.source = source }
+    }
+
+    var webdavGroups: [String: SourceEntity] = [:]
+    for library in libraries.filter({ $0.kind == "webdav" && $0.source == nil }) {
+      let baseURL = String(library.key.dropFirst("webdav:".count))
+      let groupKey = baseURL + "|" + (library.username ?? "")
+      let source: SourceEntity
+      if let cached = webdavGroups[groupKey] {
+        source = cached
+      } else {
+        let parsed = URL(string: baseURL)
+        source = ensureSource(
+          kind: "webdav", baseURL: baseURL, username: library.username,
+          defaultName: parsed.map(defaultWebDAVName) ?? "WebDAV"
+        )
+        webdavGroups[groupKey] = source
+      }
+      if Keychain.get(account: source.passwordAccount) == nil,
+         let legacy = Keychain.get(account: library.key) {
+        Keychain.set(legacy, account: source.passwordAccount)
+      }
+      library.source = source
+    }
+
+    // 目录结构迁移：旧版天翼扫描在「根下全部子目录非 series」时自动合并为整库一部；
+    // 现在结构改为显式选择（默认多部），把已合并成单系列的库固化为 single，行为保持不变。
+    // 判据：该库当前只有一个系列且系列 key == 库 key（正是单系列装配的特征）。
+    for library in libraries where library.kind == "cloud189" && library.layout == nil {
+      if library.series.count == 1, library.series.first?.key == library.key {
+        library.scanLayout = .single
+      }
+    }
+
+    try? context.save()
+  }
+
+  private func ensureSource(kind: String, baseURL: String?, username: String?, defaultName: String) -> SourceEntity {
+    let all = (try? container.mainContext.fetch(FetchDescriptor<SourceEntity>())) ?? []
+    if let hit = all.first(where: { $0.kind == kind && $0.baseURL == baseURL && $0.username == username }) {
+      return hit
+    }
+    let source = SourceEntity(key: UUID().uuidString, name: defaultName, kind: kind, baseURL: baseURL, username: username)
+    container.mainContext.insert(source)
+    return source
+  }
+
+  // MARK: - WebDAV
+
+  /// 库对应的 WebDAV 客户端（密码按账号从 Keychain 取）
+  func webdavClient(forLibrary library: LibraryEntity) -> WebDAVClient? {
+    guard library.kind == "webdav" else { return nil }
+    if let source = library.source, let client = webdavClient(for: source) { return client }
+    // 未迁移数据的兜底：旧版密码按库 key 存放
+    guard let baseURL = URL(string: String(library.key.dropFirst("webdav:".count))) else { return nil }
+    return WebDAVClient(baseURL: baseURL, username: library.username, password: Keychain.get(account: library.key))
   }
 
   // MARK: - 天翼云盘
 
-  private static let cloud189Shared = Cloud189Client()
-
-  /// 全局共享的天翼客户端（会话在 Keychain，登录由 Cloud189LoginView 完成）
-  var cloud189Client: Cloud189Client { Self.cloud189Shared }
-
   func cloud189Client(forLibrary library: LibraryEntity) -> Cloud189Client? {
     guard library.kind == "cloud189" else { return nil }
-    return Self.cloud189Shared
+    if let source = library.source { return cloud189Client(for: source) }
+    return Self.legacyCloud189Shared
   }
 
-  /// 挂载天翼云盘目录为书库（须已登录）
-  func addCloud189Library(folderId: String, familyId: String?, name: String) async -> Result<LibraryEntity, Failure> {
-    let client = Self.cloud189Shared
+  /// 在网盘账号下导入（挂载）天翼云盘目录为书库（须已登录）
+  func addCloud189Library(
+    source: SourceEntity, folderId: String, familyId: String?, name: String,
+    layout: LibraryScanLayout = .multi
+  ) async -> Result<LibraryEntity, Failure> {
+    let client = cloud189Client(for: source)
     guard client.isLoggedIn else {
       return .failure(Failure("天翼云盘未登录"))
     }
@@ -166,7 +320,12 @@ final class LibraryService {
     library.name = name
     library.remoteFolderId = folderId
     library.remoteFamilyId = familyId
-    library.username = client.session?.loginName
+    library.username = client.session?.loginName ?? source.username
+    library.source = source
+    library.scanLayout = layout
+    if source.username == nil, let nickname = client.session?.loginName {
+      source.username = nickname
+    }
     try? context.save()
 
     // 首次扫描放后台：云盘目录按协议节流逐页遍历，可能要几分钟，不能卡住挂载界面
@@ -184,31 +343,43 @@ final class LibraryService {
     }
   }
 
-  /// 连接并挂载 WebDAV 目录为书库
-  func addWebDAVLibrary(baseURL: URL, username: String?, password: String?) async -> Result<LibraryEntity, Failure> {
-    let probe = WebDAVClient(baseURL: baseURL, username: username, password: password)
+  /// 在网盘账号下导入（挂载）WebDAV 目录为书库
+  func addWebDAVLibrary(source: SourceEntity, folderURL: URL, layout: LibraryScanLayout = .multi) async -> Result<LibraryEntity, Failure> {
+    guard let client = webdavClient(for: source) else {
+      return .failure(Failure("WebDAV 账号配置无效"))
+    }
     do {
-      try await probe.verify()
+      try await client.verify()
     } catch {
       return .failure(Failure(error.localizedDescription))
     }
 
     let context = container.mainContext
-    let key = "webdav:" + baseURL.absoluteString
-    if let password { Keychain.set(password, account: key) }
-
+    let key = "webdav:" + folderURL.absoluteString
     let descriptor = FetchDescriptor<LibraryEntity>(predicate: #Predicate { $0.key == key })
     let library = (try? context.fetch(descriptor).first) ?? {
-      let name = baseURL.lastPathComponent.isEmpty ? (baseURL.host ?? "WebDAV") : baseURL.lastPathComponent
+      // 根目录挂载时 lastPathComponent 是 "/"，回落到 host
+      let lastComponent = folderURL.pathComponents.last
+      let name = (lastComponent == nil || lastComponent == "/") ? (folderURL.host ?? "WebDAV") : lastComponent!
       let lib = LibraryEntity(key: key, name: name, kind: "webdav")
       context.insert(lib)
       return lib
     }()
-    library.username = username
+    library.username = source.username
+    library.source = source
+    library.scanLayout = layout
     try? context.save()
 
     scanInBackground(library)
     return .success(library)
+  }
+
+  /// 修改书库目录结构并重扫（增量：子目录指纹没变的直接复用，装配时按新结构出结果）
+  func setScanLayout(_ layout: LibraryScanLayout, for library: LibraryEntity) async {
+    guard library.scanLayout != layout else { return }
+    library.scanLayout = layout
+    try? modelContext.save()
+    await rescan(library)
   }
 
   // MARK: - 离线预取
@@ -329,7 +500,8 @@ final class LibraryService {
       ScanLiveActivity.begin(libraryName: library.name)
       let report = await Cloud189Scanner.scanLibrary(
         client: client, rootFolderId: folderId, familyId: library.remoteFamilyId,
-        libraryKey: library.key, libraryName: library.name, mode: mode
+        libraryKey: library.key, libraryName: library.name, mode: mode,
+        layout: library.scanLayout
       ) { current, total, title in
         Task { @MainActor in
           self.scanProgress = ScanProgressInfo(current: current, total: total, title: title)
@@ -350,7 +522,10 @@ final class LibraryService {
         return
       }
       ScanLiveActivity.begin(libraryName: library.name)
-      let report = await WebDAVScanner.scanLibrary(client: client, root: root, libraryKey: library.key, mode: mode)
+      let report = await WebDAVScanner.scanLibrary(
+        client: client, root: root, libraryKey: library.key, libraryName: library.name,
+        mode: mode, layout: library.scanLayout
+      )
       apply(report: report, to: library, mode: mode)
       lastErrors = report.errors
       await generateMissingCovers(for: library, root: nil, webdavClient: client)
@@ -380,9 +555,10 @@ final class LibraryService {
     defer { access?.release() }
 
     // 扫描是同步重活，丢到后台执行器
+    let layout = library.scanLayout
     let report: ScanReport = await Task.detached(priority: .userInitiated) { [root] in
       guard let root else { return ScanReport(series: [], errors: ["书库路径无效"], isComplete: false) }
-      return LibraryScanner.scanLibraryRoot(root: root)
+      return LibraryScanner.scanLibraryRoot(root: root, layout: layout)
     }.value
 
     apply(report: report, to: library, mode: mode)
@@ -578,6 +754,7 @@ final class LibraryService {
 
   // MARK: - 移除
 
+  /// 移除一个导入的文件夹书库。账号与其凭据保留（removeSource 才清凭据）。
   func removeLibrary(_ library: LibraryEntity) {
     let context = container.mainContext
     ScanCache.clear(libraryKey: library.key)
@@ -585,7 +762,10 @@ final class LibraryService {
       try? FileManager.default.removeItem(at: importsRoot)
     }
     if library.kind == "webdav" {
-      Keychain.remove(account: library.key)
+      // 未迁移的旧库凭据按库 key 存放，移除库时一并清掉；新库凭据归账号管，不动。
+      if library.source == nil {
+        Keychain.remove(account: library.key)
+      }
       WebDAVCache.shared.removeLibrary(prefix: library.key)
     }
     if library.kind == "cloud189" {

@@ -7,7 +7,7 @@ nonisolated protocol PageSource: AnyObject, Sendable {
   var pageCount: Int { get }
   /// 远程/云端源：预取要更保守，尺寸探测不能整图下载
   var isRemote: Bool { get }
-  /// maxPixel 为最长边的解码上限（缩放解码省内存）
+  /// maxPixel 为最长边的解码上限；≤ 0 表示原图解码（超过安全像素数的巨图仍会限边）
   func pageImage(at index: Int, maxPixel: CGFloat) -> UIImage?
   func pageDims(at index: Int) -> CGSize?
 }
@@ -19,7 +19,11 @@ extension PageSource {
 // MARK: - 图片解码辅助
 
 nonisolated enum ImageDecode {
-  /// 从原始数据解码，最长边限制在 maxPixel 内
+  /// 原图解码（maxPixel ≤ 0）时的像素总数上限：超过的巨图仍按面积限边，
+  /// 防止超长条漫等极端图片把位图内存顶爆（48MP ≈ 192MB 位图）。
+  private static let maxOriginalPixels: CGFloat = 48_000_000
+
+  /// 从原始数据解码，最长边限制在 maxPixel 内；maxPixel ≤ 0 = 原图解码
   static func image(from data: Data, maxPixel: CGFloat) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
     return image(from: source, maxPixel: maxPixel)
@@ -31,11 +35,24 @@ nonisolated enum ImageDecode {
   }
 
   private static func image(from source: CGImageSource, maxPixel: CGFloat) -> UIImage? {
+    var cap = maxPixel
+    if cap <= 0 {
+      // 原图解码：只有超过安全像素数的巨图才限边，典型页面按原尺寸出图
+      let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+      let w = props?[kCGImagePropertyPixelWidth] as? CGFloat ?? 0
+      let h = props?[kCGImagePropertyPixelHeight] as? CGFloat ?? 0
+      if w > 0, h > 0, w * h > maxOriginalPixels {
+        cap = max(w, h) * (maxOriginalPixels / (w * h)).squareRoot()
+      } else {
+        // 传入原图最长边即可；ImageIO 缩略图只缩不放，等价原尺寸解码（含 EXIF 方向）
+        cap = max(w, h, 8192)
+      }
+    }
     let options: [CFString: Any] = [
       kCGImageSourceCreateThumbnailFromImageAlways: true,
       kCGImageSourceCreateThumbnailWithTransform: true,
       kCGImageSourceShouldCacheImmediately: true,
-      kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+      kCGImageSourceThumbnailMaxPixelSize: cap,
     ]
     guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
       return nil
@@ -246,7 +263,9 @@ nonisolated final class PdfPageSource: PageSource, @unchecked Sendable {
     guard let page = document.page(at: index + 1) else { return nil }
     let bounds = page.getBoxRect(.mediaBox)
     guard bounds.width > 0, bounds.height > 0 else { return nil }
-    let scale = min(maxPixel / max(bounds.width, bounds.height), 8)
+    // PDF 是矢量渲染，没有"原图"概念：原图语义下仍按 4096 出图（约 3 倍屏幕过采样）
+    let cap = maxPixel <= 0 ? CGFloat(4096) : maxPixel
+    let scale = min(cap / max(bounds.width, bounds.height), 8)
     let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1

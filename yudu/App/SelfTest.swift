@@ -145,12 +145,22 @@ enum SelfTest {
       try? await Task.sleep(for: .seconds(1.2))
     }
 
-    // 6c. WebDAV 挂载与远程阅读
+    // 6c. WebDAV 账号 + 挂载与远程阅读
     if let webdavURL {
-      let result = await libraryService.addWebDAVLibrary(baseURL: webdavURL, username: nil, password: nil)
       var webdavMarker = "OK"
-      if case .failure(let failure) = result {
-        webdavMarker = "WEBDAV_FAIL:\(failure.message)"
+      let sourceResult = await libraryService.createWebDAVSource(
+        name: "SelfTest", address: webdavURL.absoluteString, username: nil, password: nil
+      )
+      var webdavSource: SourceEntity?
+      switch sourceResult {
+      case .success(let source): webdavSource = source
+      case .failure(let failure): webdavMarker = "WEBDAV_SOURCE_FAIL:\(failure.message)"
+      }
+      if let webdavSource {
+        let result = await libraryService.addWebDAVLibrary(source: webdavSource, folderURL: webdavURL)
+        if case .failure(let failure) = result {
+          webdavMarker = "WEBDAV_FAIL:\(failure.message)"
+        }
       }
       // 诊断：挂载后的系列数与扫描错误
       let wdCount = ((try? libraryService.modelContext.fetch(FetchDescriptor<LibraryEntity>())) ?? [])
@@ -255,6 +265,46 @@ enum SelfTest {
       } else {
         webdavMarker = "WEBDAV_NO_FOLDER_CHAPTER"
       }
+
+      // 11c. 浏览器试读：未挂载章节直驱阅读管线，不落进度、不进书架
+      if let webdavSource,
+         let previewSeries = wdSeries.first(where: { s in
+           s.chapters.contains { $0.kind == "zip" }
+         }),
+         let previewChapter = Queries.orderedChapters(previewSeries).first(where: { $0.kind == "zip" }) {
+        let progressBefore = previewChapter.progress?.page
+        let payload = PreviewPayload(
+          sourceKey: webdavSource.key, sourceKind: "webdav",
+          folderTitle: previewSeries.title,
+          items: [
+            PreviewChapterItem(
+              path: previewChapter.path, kind: previewChapter.kind, title: previewChapter.title,
+              size: previewChapter.fileSize, modifiedAt: previewChapter.modifiedAt
+            )
+          ],
+          index: 0
+        )
+        ReaderProbe.lastPageCount = 0
+        router.tab = .library
+        try? await Task.sleep(for: .seconds(0.8))
+        router.openPreviewReader(payload)
+        try? await Task.sleep(for: .seconds(8.0))
+        shot("11c-preview-reader")
+        guard ReaderProbe.lastPageCount > 0 else {
+          writeDone(marker: "PREVIEW_READER_NO_PAGES")
+          return
+        }
+        let progressAfter = previewChapter.progress?.page
+        router.libraryPath.removeAll()
+        router.tab = .bookshelf
+        try? await Task.sleep(for: .seconds(1.0))
+        if progressBefore != progressAfter {
+          webdavMarker = "PREVIEW_WROTE_PROGRESS"
+        }
+      } else {
+        webdavMarker = "WEBDAV_NO_PREVIEW_SOURCE"
+      }
+
       if webdavMarker != "OK" {
         writeDone(marker: webdavMarker)
         return
@@ -266,7 +316,7 @@ enum SelfTest {
     do {
       let probe = Cloud189Client()
       let qr = try await probe.beginQRLogin()
-      let image = Cloud189LoginView.makeQRCode(text: qr.uuid)
+      let image = Cloud189LoginFlowView.makeQRCode(text: qr.uuid)
       let qrDiag = "cloud189 qr: uuid=\(qr.uuid.prefix(24))… image=\(image != nil ? "\(Int(image!.size.width))px" : "nil")"
       try? qrDiag.data(using: .utf8)?.write(to: diagDir.appendingPathComponent("cloud189-diag.txt"))
     } catch {

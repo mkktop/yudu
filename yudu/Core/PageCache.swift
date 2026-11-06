@@ -3,20 +3,51 @@ import UIKit
 import CryptoKit
 import os
 
-/// 页图内存缓存：解码最长边 ≤ maxPixel；命中直接返回，未命中经页源解码
+/// 页图内存缓存：按 key（源#页码#解码上限，≤0 为原图）缓存解码位图；命中直接返回，未命中经页源解码
 nonisolated final class PageCache: @unchecked Sendable {
   static let shared = PageCache()
 
   private let cache = NSCache<NSString, UIImage>()
-  /// 进行中的解码去重（同页并发请求只解一次）
-  private var inflight: [String: Task<UIImage?, Never>] = [:]
+  /// 进行中的解码去重：解码完成（含失败）才移除条目，
+  /// 等待期间不会被先完成的等待者误删，避免同页并发时重复解码大图。
+  private var inflight: [String: InflightBox] = [:]
   private var lock = NSLock()
 
+  /// 引用盒：Task 是值类型没法比身份，用类实例判断「仍是当前那次解码」。
+  /// seats 记录还在等结果的调用方数量；全部退席（任务被取消）才取消底层解码，
+  /// 前台 / 预取 / 条漫并发请求同一页时互不误伤。
+  private final class InflightBox: @unchecked Sendable {
+    var task: Task<UIImage?, Never>?
+    private let seatLock = NSLock()
+    private var seats = 0
+
+    func addSeat() {
+      seatLock.withLock { seats += 1 }
+    }
+
+    /// 幂等：onCancel 与 await 正常结束后的退席可能都触发
+    func removeSeat() {
+      seatLock.withLock {
+        guard seats > 0 else { return }
+        seats -= 1
+        // 最后一个等待者走了：排队中的解码直接跳过，不再占用线程池
+        if seats == 0 { task?.cancel() }
+      }
+    }
+  }
+
   private init() {
-    // 按设备物理内存定上限：6GB 以上给 1GB，老的给 512MB
-    // （NSCache 在系统内存吃紧时会自动清空，是安全的可牺牲缓存）
+    // 按设备物理内存分档：8GB+ 给 1.5GB，6GB+ 给 1GB，其余 512MB。
+    // 大内存机器多驻留原图，回翻基本不再重新解码；
+    // NSCache 在系统内存吃紧时会自动清空，是安全的可牺牲缓存，给多了也无害。
     let physical = ProcessInfo.processInfo.physicalMemory
-    cache.totalCostLimit = physical >= 6 << 30 ? 1 << 30 : 512 * 1024 * 1024
+    if physical >= 8 << 30 {
+      cache.totalCostLimit = 1536 << 20
+    } else if physical >= 6 << 30 {
+      cache.totalCostLimit = 1 << 30
+    } else {
+      cache.totalCostLimit = 512 << 20
+    }
     cache.countLimit = 80
   }
 
@@ -31,6 +62,8 @@ nonisolated final class PageCache: @unchecked Sendable {
 
   /// 异步取：缓存 → 去重解码 → 缓存。
   /// 加载本身跑在专用有界线程池，页源里的同步网络桥接不会阻塞 Swift 并发池。
+  /// 取消语义：调用方任务被取消即退席；同页的所有等待者都退席后才取消底层解码
+  /// （排队中的操作直接跳过），谁先取消都不影响其他还在等的调用方。
   func image(
     sourceID: String, index: Int, maxPixel: Int,
     priority: TaskPriority = .userInitiated,
@@ -42,27 +75,44 @@ nonisolated final class PageCache: @unchecked Sendable {
     }
     let interval = Perf.signposter.beginInterval("page-load")
     defer { Perf.signposter.endInterval("page-load", interval) }
-    let task: Task<UIImage?, Never> = lock.withLock {
-      if let existing = inflight[String(Self.key(sourceID, index, maxPixel: maxPixel))] {
-        return existing
-      }
-      let task = Task.detached(priority: priority) { [loader] in
-        await PageLoadExecutor.shared.run(priority: priority) {
+    let key = String(Self.key(sourceID, index, maxPixel: maxPixel))
+    let box: InflightBox = lock.withLock {
+      if let existing = inflight[key] { return existing }
+      let box = InflightBox()
+      box.task = Task.detached(priority: priority) { [loader] in
+        let image = await PageLoadExecutor.shared.run(priority: priority) {
           autoreleasepool { loader() }
         }
+        // 先落缓存再清 inflight：两步之间到达的新请求会走缓存命中，
+        // 反过来的顺序会留下一个"缓存没有、去重也没有"的空窗，开出重复解码
+        if let image {
+          PageCache.shared.cache.setObject(
+            image, forKey: Self.key(sourceID, index, maxPixel: maxPixel),
+            cost: Int(image.size.width * image.size.height * 4)
+          )
+        }
+        PageCache.shared.finishInflight(key: key, box: box)
+        return image
       }
-      inflight[String(Self.key(sourceID, index, maxPixel: maxPixel))] = task
-      return task
+      inflight[key] = box
+      return box
     }
-    let image = await task.value
-    _ = lock.withLock {
-      inflight.removeValue(forKey: String(Self.key(sourceID, index, maxPixel: maxPixel)))
+    // 席位 = 一个等待者；任务被取消时 onCancel 退席，最后一个退席的取消排队中的解码
+    box.addSeat()
+    let image = await withTaskCancellationHandler {
+      await box.task!.value
+    } onCancel: {
+      box.removeSeat()
     }
-    if let image {
-      cache.setObject(image, forKey: Self.key(sourceID, index, maxPixel: maxPixel),
-                      cost: Int(image.size.width * image.size.height * 4))
-    }
+    box.removeSeat() // 正常结束也退席
     return image
+  }
+
+  /// 解码收尾：只有仍是当前那次解码时才清条目（期间可能已被新解码替换）
+  private func finishInflight(key: String, box: InflightBox) {
+    lock.withLock {
+      if inflight[key] === box { inflight.removeValue(forKey: key) }
+    }
   }
 
   func clear() {

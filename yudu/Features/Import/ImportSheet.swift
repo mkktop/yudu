@@ -7,10 +7,9 @@ struct ImportSheet: View {
   @Environment(\.dismiss) private var dismiss
   @State private var showFilePicker = false
   @State private var showFolderPicker = false
-  @State private var showWebDAV = false
-  @State private var showCloud189 = false
   @State private var importing = false
   @State private var outcome: ImportOutcome?
+  @State private var pendingFolder: PendingFolder?
 
   private struct ImportOutcome {
     let message: String
@@ -37,12 +36,8 @@ struct ImportSheet: View {
             ImportEntryCard(title: "授权文件夹", caption: "文件 App / iCloud · 原地读取，无需重复拷贝", icon: "folder.badge.plus", tint: YuduTheme.accent) { showFolderPicker = true }
           }
           .disabled(importing || libraryService.isScanning)
-          VStack(alignment: .leading, spacing: 12) {
-            Text("连接云端书库").font(.caption.weight(.medium)).foregroundStyle(YuduTheme.muted)
-            ImportEntryCard(title: "WebDAV / NAS", caption: "连接坚果云或私人服务器，支持离线缓存", icon: "externaldrive.connected.to.line.below", tint: YuduTheme.violet) { showWebDAV = true }
-            ImportEntryCard(title: "天翼云盘", caption: "扫码登录 · 个人云与家庭云", icon: "cloud", tint: YuduTheme.violet) { showCloud189 = true }
-          }
-          .disabled(importing || libraryService.isScanning)
+          Label("网盘漫画在「资源库」页添加账号后整盘浏览、随选随导", systemImage: "cloud")
+            .font(.caption).foregroundStyle(YuduTheme.muted)
           if importing || libraryService.isScanning {
             HStack(spacing: 12) {
               ProgressView().tint(YuduTheme.accent)
@@ -79,14 +74,11 @@ struct ImportSheet: View {
     .interactiveDismissDisabled(importing)
     .fileImporter(isPresented: $showFilePicker, allowedContentTypes: fileTypes, allowsMultipleSelection: true, onCompletion: handleFileResult)
     .fileImporter(isPresented: $showFolderPicker, allowedContentTypes: [.folder], allowsMultipleSelection: false, onCompletion: handleFolderResult)
-    .sheet(isPresented: $showWebDAV) { WebDAVSetupView() }
-    .sheet(isPresented: $showCloud189) { Cloud189LoginView() }
-    .task {
-      #if DEBUG
-      let args = ProcessInfo.processInfo.arguments
-      if args.contains("-yuduShowWebDAV") { showWebDAV = true }
-      if args.contains("-yuduShowCloud189") { showCloud189 = true }
-      #endif
+    .sheet(item: $pendingFolder) { pick in
+      LibraryScanLayoutPicker(folderName: pick.url.lastPathComponent) { layout in
+        pendingFolder = nil
+        importFolder(pick.url, layout: layout)
+      }
     }
   }
 
@@ -126,10 +118,27 @@ struct ImportSheet: View {
 
   private func handleFolderResult(_ result: Result<[URL], Error>) {
     guard let folder = selectedURLs(result).first else { return }
+    // 有子文件夹时无法可靠区分「一部作品」还是「一个库」，先让用户选择目录结构
+    let hasSubdirs: Bool = {
+      let scoped = folder.startAccessingSecurityScopedResource()
+      defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+      let children = (try? FileManager.default.contentsOfDirectory(
+        at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+      )) ?? []
+      return children.contains { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }
+    }()
+    if hasSubdirs {
+      pendingFolder = PendingFolder(url: folder)
+    } else {
+      importFolder(folder, layout: .multi)
+    }
+  }
+
+  private func importFolder(_ folder: URL, layout: LibraryScanLayout) {
     importing = true
     outcome = nil
     Task {
-      let result = await libraryService.addFolderLibrary(url: folder)
+      let result = await libraryService.addFolderLibrary(url: folder, layout: layout)
       importing = false
       switch result {
       case .success(let library): outcome = ImportOutcome(message: "「\(library.name)」共发现 \(library.series.count) 部漫画。", success: true)
@@ -137,6 +146,12 @@ struct ImportSheet: View {
       }
     }
   }
+}
+
+/// 待确认目录结构的授权文件夹
+private struct PendingFolder: Identifiable {
+  let url: URL
+  var id: String { url.path }
 }
 
 private struct ImportEntryCard: View {
