@@ -216,6 +216,13 @@ nonisolated final class FolderPageSource: PageSource, @unchecked Sendable {
 
 nonisolated final class ZipPageSource: PageSource, @unchecked Sendable {
   private let zip: ZipFile
+  /// 最近解压过的页：条漫先探测尺寸再解码，同页会被两次请求，缓存避免重复解压。
+  private let entryCache: NSCache<NSNumber, NSData> = {
+    let cache = NSCache<NSNumber, NSData>()
+    cache.countLimit = 4
+    cache.totalCostLimit = 64 << 20
+    return cache
+  }()
 
   init(fileURL: URL) throws {
     self.zip = try ZipFile(url: fileURL)
@@ -228,13 +235,22 @@ nonisolated final class ZipPageSource: PageSource, @unchecked Sendable {
 
   var pageCount: Int { zip.pageCount }
 
-  func pageImage(at index: Int, maxPixel: CGFloat) -> UIImage? {
+  private func entryData(at index: Int) -> Data? {
+    guard zip.entries.indices.contains(index) else { return nil }
+    let key = NSNumber(value: index)
+    if let hit = entryCache.object(forKey: key) { return hit as Data }
     guard let data = zip.entryData(at: index) else { return nil }
+    entryCache.setObject(data as NSData, forKey: key, cost: data.count)
+    return data
+  }
+
+  func pageImage(at index: Int, maxPixel: CGFloat) -> UIImage? {
+    guard let data = entryData(at: index) else { return nil }
     return ImageDecode.image(from: data, maxPixel: maxPixel)
   }
 
   func pageDims(at index: Int) -> CGSize? {
-    guard let data = zip.entryData(at: index) else { return nil }
+    guard let data = entryData(at: index) else { return nil }
     return ImageDecode.dims(from: data)
   }
 }

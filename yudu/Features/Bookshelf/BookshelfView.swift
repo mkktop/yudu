@@ -30,8 +30,9 @@ struct BookshelfView: View {
   @AppStorage("shelfSort") private var sortRaw = Sort.recent.rawValue
   @AppStorage("shelfListLayout") private var listLayout = false
 
-  private var infos: [Queries.SeriesInfo] { allSeries.map { Queries.info($0) } }
-  private var filtered: [Queries.SeriesInfo] {
+  /// 一次 body 只从模型算一遍 SeriesInfo；搜索、筛选、排序都在这个快照上做。
+  /// 之前它是计算属性，一次 body 被访问 6 次以上，每次都会重扫全部章节。
+  private func filtered(_ infos: [Queries.SeriesInfo]) -> [Queries.SeriesInfo] {
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     let result = infos.filter {
       filter.includes($0.status)
@@ -53,11 +54,12 @@ struct BookshelfView: View {
   }
 
   var body: some View {
+    let infos = allSeries.map { Queries.info($0) }
     @Bindable var router = router
     NavigationStack(path: $router.bookshelfPath) {
       ScrollView {
         VStack(alignment: .leading, spacing: 26) {
-          heading
+          heading(infos)
           if libraryService.isScanning {
             HStack(spacing: 10) {
               ProgressView().tint(YuduTheme.accent)
@@ -73,8 +75,8 @@ struct BookshelfView: View {
           if allSeries.isEmpty {
             emptyState
           } else {
-            if searchText.isEmpty && sourceKey == nil { continueSection }
-            collectionSection
+            if searchText.isEmpty && sourceKey == nil { continueSection(infos) }
+            collectionSection(infos)
           }
         }
         .padding(.horizontal, 20)
@@ -126,7 +128,7 @@ struct BookshelfView: View {
     }
   }
 
-  private var heading: some View {
+  private func heading(_ infos: [Queries.SeriesInfo]) -> some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("YOUR PRIVATE UNIVERSE")
         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -134,15 +136,15 @@ struct BookshelfView: View {
       Text("故事，在此汇聚。")
         .font(.system(.largeTitle, design: .rounded, weight: .semibold))
         .minimumScaleFactor(0.7)
-      Text(allSeries.isEmpty ? "为你的第一个故事，留一个位置。" : "\(allSeries.count) 部漫画 · \(infos.filter { $0.status == .reading }.count) 部在读")
+      Text(allSeries.isEmpty ? "为你的第一个故事，留一个位置。" : "\(allSeries.count) 部漫画 · \(infos.lazy.filter { $0.status == .reading }.count) 部在读")
         .font(.subheadline).foregroundStyle(YuduTheme.muted)
     }
     .accessibilityElement(children: .combine)
   }
 
   @ViewBuilder
-  private var continueSection: some View {
-    let items = Queries.continueItems(allSeries)
+  private func continueSection(_ infos: [Queries.SeriesInfo]) -> some View {
+    let items = Queries.continueItems(infos)
     if let first = items.first {
       VStack(alignment: .leading, spacing: 14) {
         SectionHeading(title: "接着上次的故事", eyebrow: "CONTINUE READING")
@@ -170,10 +172,11 @@ struct BookshelfView: View {
     }
   }
 
-  private var collectionSection: some View {
-    VStack(alignment: .leading, spacing: 16) {
+  private func collectionSection(_ infos: [Queries.SeriesInfo]) -> some View {
+    let result = filtered(infos)
+    return VStack(alignment: .leading, spacing: 16) {
       HStack {
-        SectionHeading(title: "我的收藏", eyebrow: "COLLECTION", detail: "\(filtered.count) 部")
+        SectionHeading(title: "我的收藏", eyebrow: "COLLECTION", detail: "\(result.count) 部")
         Menu {
           Picker("排序", selection: $sortRaw) {
             ForEach(Sort.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
@@ -187,7 +190,7 @@ struct BookshelfView: View {
         }
         .accessibilityLabel("书架排序与布局")
       }
-      filterChips
+      filterChips(infos)
       HStack {
         Menu {
           Button("所有来源") { sourceKey = nil }
@@ -208,7 +211,7 @@ struct BookshelfView: View {
         Text(sortRaw).font(.caption2).foregroundStyle(YuduTheme.muted)
       }
       .padding(.vertical, -8)
-      if filtered.isEmpty {
+      if result.isEmpty {
         VStack(spacing: 12) {
           Image(systemName: "sparkle.magnifyingglass").font(.largeTitle).foregroundStyle(YuduTheme.muted)
           Text("没有匹配的漫画").font(.headline)
@@ -220,14 +223,14 @@ struct BookshelfView: View {
         .frame(maxWidth: .infinity).padding(.vertical, 32).yuduPanel()
       } else if listLayout {
         LazyVStack(spacing: 12) {
-          ForEach(filtered, id: \.series.persistentModelID) { info in
+          ForEach(result, id: \.series.persistentModelID) { info in
             NavigationLink(value: BookshelfRoute.series(info.series)) { ShelfRow(info: info) }
               .buttonStyle(.plain)
           }
         }
       } else {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 98, maximum: 168), spacing: 14)], alignment: .leading, spacing: 22) {
-          ForEach(filtered, id: \.series.persistentModelID) { info in
+          ForEach(result, id: \.series.persistentModelID) { info in
             NavigationLink(value: BookshelfRoute.series(info.series)) { CoverCard(info: info) }
               .buttonStyle(.plain)
           }
@@ -236,7 +239,7 @@ struct BookshelfView: View {
     }
   }
 
-  private var filterChips: some View {
+  private func filterChips(_ infos: [Queries.SeriesInfo]) -> some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
         ForEach(Filter.allCases) { chip in
@@ -244,7 +247,7 @@ struct BookshelfView: View {
           Button { filter = chip } label: {
             HStack(spacing: 6) {
               Text(chip.rawValue)
-              Text("\(infos.filter { chip.includes($0.status) }.count)")
+              Text("\(infos.lazy.filter { chip.includes($0.status) }.count)")
                 .font(.caption2.monospacedDigit()).opacity(0.7)
             }
             .font(.caption.weight(.medium))

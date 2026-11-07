@@ -23,7 +23,12 @@ struct LibraryView: View {
   @State private var statusVersion = 0
   @State private var accountStatus: [String: AccountStatus] = [:]
 
-  private enum AccountStatus { case checking, connected, needsRelogin }
+  private enum AccountStatus: Sendable { case checking, connected, needsRelogin }
+
+  private struct WebDAVCheck: Sendable {
+    let key: String
+    let client: WebDAVClient?
+  }
 
   private var localLibraries: [LibraryEntity] {
     libraries.filter { $0.source == nil }
@@ -360,20 +365,12 @@ struct LibraryView: View {
   }
 
   private func refreshAccountStatus() async {
+    var checks: [WebDAVCheck] = []
     for source in sources {
       switch source.kind {
       case "webdav":
         accountStatus[source.key] = .checking
-        guard let client = libraryService.webdavClient(for: source) else {
-          accountStatus[source.key] = .needsRelogin
-          continue
-        }
-        do {
-          try await client.verify()
-          accountStatus[source.key] = .connected
-        } catch {
-          accountStatus[source.key] = .needsRelogin
-        }
+        checks.append(WebDAVCheck(key: source.key, client: libraryService.webdavClient(for: source)))
       case "cloud189":
         let session = libraryService.cloud189Client(for: source).session
         accountStatus[source.key] = (session?.expiresAt ?? .distantPast) > .now ? .connected : .needsRelogin
@@ -381,6 +378,27 @@ struct LibraryView: View {
         break
       }
     }
+    guard !checks.isEmpty else { return }
+
+    // 账号之间并发检查，并给每个请求 8 秒超时；之前串行 30 秒，一个掉线地址会拖住后面所有账号。
+    let results = await withTaskGroup(of: (String, AccountStatus).self) { group -> [(String, AccountStatus)] in
+      for check in checks {
+        group.addTask {
+          guard let client = check.client else { return (check.key, .needsRelogin) }
+          do {
+            try await client.verify(timeout: 8)
+            return (check.key, .connected)
+          } catch {
+            return (check.key, .needsRelogin)
+          }
+        }
+      }
+      var collected: [(String, AccountStatus)] = []
+      for await result in group { collected.append(result) }
+      return collected
+    }
+    guard !Task.isCancelled else { return }
+    for (key, status) in results { accountStatus[key] = status }
   }
 
   // MARK: - 扫描状态

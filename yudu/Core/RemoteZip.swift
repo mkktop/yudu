@@ -110,6 +110,13 @@ nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
   private let fetcher: RangeFetcher
   private let entries: [ZipFile.Entry]
   private let totalSize: Int
+  /// 最近取回的页：尺寸探测与解码共用，避免同一页 Range 下载/解压两遍。
+  private let entryCache: NSCache<NSNumber, NSData> = {
+    let cache = NSCache<NSNumber, NSData>()
+    cache.countLimit = 4
+    cache.totalCostLimit = 96 << 20
+    return cache
+  }()
 
   enum RemoteZipError: Error, LocalizedError {
     case noRangeSupport
@@ -157,8 +164,17 @@ nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
     entryData(at: index).flatMap { ImageDecode.dims(from: $0) }
   }
 
-  /// 单页三段请求：本地头(30B+名长) → 压缩字节 → 解压
   private func entryData(at index: Int) -> Data? {
+    guard entries.indices.contains(index) else { return nil }
+    let key = NSNumber(value: index)
+    if let hit = entryCache.object(forKey: key) { return hit as Data }
+    guard let data = loadEntryData(at: index) else { return nil }
+    entryCache.setObject(data as NSData, forKey: key, cost: data.count)
+    return data
+  }
+
+  /// 单页三段请求：本地头(30B+名长) → 压缩字节 → 解压
+  private func loadEntryData(at index: Int) -> Data? {
     guard entries.indices.contains(index) else { return nil }
     let entry = entries[index]
     guard let lho = Int(exactly: entry.localHeaderOffset),

@@ -19,7 +19,10 @@ jobs:
         run: |
           xcrun swiftc -swift-version 5 -parse-as-library \
             yudu/Model/Entities.swift yudu/Model/Queries.swift \
-            yudu/Core/WebDAV/WebDAVAddress.swift tests/QueriesChecks.swift \
+            yudu/Core/WebDAV/WebDAVAddress.swift \
+            yudu/Core/MediaSniff.swift yudu/Core/FilenameParser.swift \
+            yudu/Core/ZipFile.swift yudu/Core/Scanner.swift \
+            tests/QueriesChecks.swift \
             -o "$RUNNER_TEMP/yudu-checks"
           "$RUNNER_TEMP/yudu-checks"
       - name: ZIP and filename parser regression checks

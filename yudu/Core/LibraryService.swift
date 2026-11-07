@@ -2,6 +2,15 @@ import Foundation
 import SwiftData
 import Observation
 
+/// 封面生成所需的最小值快照：用来把“第一话 + 磁盘/网络检查”移出主线程。
+private nonisolated struct SeriesCoverSnapshot: Sendable {
+  let seriesKey: String
+  let chapterPath: String
+  let kind: String
+  let modifiedAt: Date
+  let fileSize: Int64
+}
+
 /// 书库编排：添加/导入/重扫/移除，扫描在后台跑、结果回主线程落库
 @MainActor
 @Observable
@@ -333,14 +342,9 @@ final class LibraryService {
     return .success(library)
   }
 
-  /// 后台完成首次扫描（rescan 遇忙直接返回，这里等它空闲再扫）
+  /// 后台完成首次扫描。rescan 自己会等待当前扫描结束，不再吞掉这次扫描。
   private func scanInBackground(_ library: LibraryEntity) {
-    Task {
-      while isScanning {
-        try? await Task.sleep(for: .seconds(0.5))
-      }
-      await rescan(library)
-    }
+    Task { await rescan(library) }
   }
 
   /// 在网盘账号下导入（挂载）WebDAV 目录为书库
@@ -480,8 +484,19 @@ final class LibraryService {
 
   // MARK: - 重扫
 
+  /// 等待当前扫描结束；调用方在 await 之后会重新检查 isScanning 再抢占。
+  private func waitForScanIdle() async {
+    while isScanning {
+      if Task.isCancelled { return }
+      try? await Task.sleep(for: .milliseconds(150))
+    }
+  }
+
   func rescan(_ library: LibraryEntity, mode: LibraryScanMode = .incremental) async {
-    guard !isScanning else { return }
+    // 导入/挂载常常紧跟在另一次扫描之后；之前这里直接 return，会让刚导入的文件
+    // 扫描不到但界面仍报成功。现在排队等当前扫描结束再执行。
+    if isScanning { await waitForScanIdle() }
+    guard !Task.isCancelled, !isScanning else { return }
     isScanning = true
     lastScanSummary = nil
     defer {
@@ -569,7 +584,8 @@ final class LibraryService {
   }
 
   func rescanAll(mode: LibraryScanMode = .incremental) async {
-    guard !isScanning else { return }
+    if isScanning { await waitForScanIdle() }
+    guard !Task.isCancelled, !isScanning else { return }
     let context = container.mainContext
     let descriptor = FetchDescriptor<LibraryEntity>()
     let libraries = (try? context.fetch(descriptor)) ?? []
@@ -614,10 +630,23 @@ final class LibraryService {
     let context = container.mainContext
     let scannedKeys = Set(report.series.map(\.key))
 
-    // 全量章节索引（按 path 去重匹配）
-    let allChapters = (try? context.fetch(FetchDescriptor<ChapterEntity>())) ?? []
+    // 只索引本库的章节。之前每次重扫都 fetch 全库所有章节，大库会明显卡主线程。
     var chapterByPath: [String: ChapterEntity] = [:]
-    for ch in allChapters { chapterByPath[ch.path] = ch }
+    for series in library.series {
+      for chapter in series.chapters { chapterByPath[chapter.path] = chapter }
+    }
+    // 少量“从别的书库移过来”的章节：按 path 单独找回，避免唯一键冲突；
+    // 新增内容通常整批出现，不做逐条查询。
+    let allScannedPaths = Set(report.series.flatMap { $0.chapters.map(\.path) })
+    let missingPaths = allScannedPaths.subtracting(chapterByPath.keys)
+    if !missingPaths.isEmpty, missingPaths.count <= 16 {
+      for path in missingPaths {
+        let descriptor = FetchDescriptor<ChapterEntity>(predicate: #Predicate { $0.path == path })
+        if let existing = try? context.fetch(descriptor).first, chapterByPath[path] == nil {
+          chapterByPath[path] = existing
+        }
+      }
+    }
 
     for scanned in report.series {
       let displayTitle = library.kind == "imports"
@@ -697,35 +726,48 @@ final class LibraryService {
       let modifiedAt: Date
       let version: String
     }
-    var jobs: [CoverJob] = []
-    for series in library.series {
-      let first = Queries.orderedChapters(series).first
-      guard let first else { continue }
-      guard !CoverStore.shared.isFresh(seriesKey: series.key, sourceModifiedAt: first.modifiedAt) else {
-        continue
-      }
-      // 远程 zip 只取中央目录 + 首页；PDF 只能整包下载，超过 40MB 就放弃。
-      if first.kind == "pdf" {
-        if cloud189Client != nil {
-          if first.fileSize > 40 * 1024 * 1024 { continue }
-        } else if let webdavClient,
-                  let url = URL(string: first.path),
-                  let length = await webdavClient.contentLength(url), length > 40 * 1024 * 1024 {
-          continue
-        }
-      }
-      jobs.append(
-        CoverJob(
-          seriesKey: series.key,
-          chapterPath: first.path,
-          kind: first.kind,
-          modifiedAt: first.modifiedAt,
-          version: "\(first.path)#\(Int(first.modifiedAt.timeIntervalSince1970))#\(first.fileSize)"
-        )
+
+    // 主线程只取每部漫画的第一话做成值快照；磁盘 stat、PDF 体积 HEAD 和生成都在后台。
+    let snapshots = library.series.compactMap { series -> SeriesCoverSnapshot? in
+      guard let first = Queries.firstChapter(series) else { return nil }
+      return SeriesCoverSnapshot(
+        seriesKey: series.key,
+        chapterPath: first.path,
+        kind: first.kind,
+        modifiedAt: first.modifiedAt,
+        fileSize: first.fileSize
       )
     }
-    guard !jobs.isEmpty else { return }
-    let done = await Task.detached(priority: .utility) { [jobs, root, webdavClient, cloud189Client] in
+    guard !snapshots.isEmpty else { return }
+
+    let done = await Task.detached(priority: .utility) { [snapshots, root, webdavClient, cloud189Client] in
+      var jobs: [CoverJob] = []
+      for snapshot in snapshots {
+        guard !CoverStore.shared.isFresh(
+          seriesKey: snapshot.seriesKey, sourceModifiedAt: snapshot.modifiedAt
+        ) else { continue }
+        // 远程 zip 只取中央目录 + 首页；PDF 只能整包下载，超过 40MB 就放弃。
+        if snapshot.kind == "pdf" {
+          if cloud189Client != nil {
+            if snapshot.fileSize > 40 * 1024 * 1024 { continue }
+          } else if let webdavClient,
+                    let url = URL(string: snapshot.chapterPath),
+                    let length = await webdavClient.contentLength(url),
+                    length > 40 * 1024 * 1024 {
+            continue
+          }
+        }
+        jobs.append(
+          CoverJob(
+            seriesKey: snapshot.seriesKey,
+            chapterPath: snapshot.chapterPath,
+            kind: snapshot.kind,
+            modifiedAt: snapshot.modifiedAt,
+            version: "\(snapshot.chapterPath)#\(Int(snapshot.modifiedAt.timeIntervalSince1970))#\(snapshot.fileSize)"
+          )
+        )
+      }
+      guard !jobs.isEmpty else { return 0 }
       var count = 0
       // 封面最多 3 个并发，避免大量远端请求同时排队；阅读时让路。
       for start in stride(from: 0, to: jobs.count, by: 3) {

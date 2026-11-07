@@ -18,6 +18,13 @@ struct CloudBrowserView: View {
   @State private var message: String?
   @State private var toast: String?
   @State private var mountedKeys: Set<String> = []
+  /// 当前目录里已缓存的章节 path；一次目录加载只做一遍哈希/文件检查，不在每行 body 里做。
+  @State private var cachedPaths: Set<String> = []
+  @State private var setupFinished = false
+  /// 目录读取失败时保留目标，列表里提供原地重试。
+  @State private var loadRetryFolder: CloudBrowserFolder?
+  /// 目录请求代次：快速返回上一级时，避免旧请求的结果覆盖新目录。
+  @State private var loadEpoch = 0
   /// 待导入的目录：含子文件夹时先弹「目录结构」选择
   @State private var importTarget: ImportTarget?
 
@@ -53,11 +60,16 @@ struct CloudBrowserView: View {
       }
       Section {
         if !path.isEmpty {
-          Button {
-            path.removeLast()
-            if let folder = currentFolder { Task { await load(folder) } }
-          } label: {
+          Button { goUp() } label: {
             Label("上一级", systemImage: "arrow.up")
+          }
+        }
+        if let folder = loadRetryFolder {
+          Button {
+            loadRetryFolder = nil
+            Task { await load(folder) }
+          } label: {
+            Label("重新加载此目录", systemImage: "arrow.clockwise")
           }
         }
         if !busy && items.isEmpty && message == nil {
@@ -77,12 +89,38 @@ struct CloudBrowserView: View {
         }
       }
     }
+    .disabled(busy || provider == nil)
     .yuduPage()
     .navigationTitle(path.last?.name ?? source.name)
     .navigationBarTitleDisplayMode(.inline)
-    .disabled(busy || provider == nil)
+    .navigationBarBackButtonHidden(!path.isEmpty)
+    .toolbar {
+      if !path.isEmpty {
+        ToolbarItem(placement: .topBarLeading) {
+          Button { goUp() } label: {
+            Label("上一级", systemImage: "chevron.left")
+          }
+        }
+      }
+    }
     .overlay {
-      if busy { ProgressView() }
+      if busy {
+        ProgressView()
+      } else if setupFinished, provider == nil {
+        VStack(spacing: 14) {
+          Image(systemName: "exclamationmark.triangle")
+            .font(.largeTitle)
+            .foregroundStyle(.white.opacity(0.65))
+          Text("无法打开这个网盘").font(.headline)
+          Text("检查网络或账号状态后重试。")
+            .font(.caption).foregroundStyle(YuduTheme.muted)
+          Button("重试") { Task { await setup() } }
+            .buttonStyle(.borderedProminent)
+            .tint(YuduTheme.accent)
+        }
+        .padding(24)
+        .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 18))
+      }
     }
     .overlay(alignment: .top) {
       if let text = toast {
@@ -106,6 +144,7 @@ struct CloudBrowserView: View {
         Task { await performImport(target.folder, name: target.name, layout: layout) }
       }
     }
+    .onAppear { refreshCachedSet() }
     .alert("无法完成操作", isPresented: Binding(
       get: { message != nil },
       set: { if !$0 { message = nil } }
@@ -153,7 +192,7 @@ struct CloudBrowserView: View {
   }
 
   private func fileRow(_ item: CloudBrowserItem) -> some View {
-    let cached = isCached(item)
+    let cached = cachePath(for: item).map { cachedPaths.contains($0) } ?? false
     return Button {
       previewRead(item)
     } label: {
@@ -225,10 +264,22 @@ struct CloudBrowserView: View {
 
   // MARK: - 状态
 
+  /// 返回上一级目录（系统返回键在子目录里也执行这个语义，而不是直接退出浏览器）。
+  private func goUp() {
+    guard !path.isEmpty else { return }
+    path.removeLast()
+    if let folder = currentFolder { Task { await load(folder) } }
+  }
+
   private func setup() async {
     guard provider == nil else { return }
     busy = true
-    defer { busy = false }
+    setupFinished = false
+    message = nil
+    defer {
+      busy = false
+      setupFinished = true
+    }
     switch source.kind {
     case "webdav":
       guard let client = libraryService.webdavClient(for: source),
@@ -263,13 +314,25 @@ struct CloudBrowserView: View {
 
   private func load(_ folder: CloudBrowserFolder) async {
     guard let provider else { return }
+    loadEpoch += 1
+    let epoch = loadEpoch
     busy = true
-    defer { busy = false }
+    defer {
+      // 只有最新一次请求能结束 loading 状态。
+      if epoch == loadEpoch { busy = false }
+    }
     items = []
+    cachedPaths = []
+    loadRetryFolder = nil
     do {
-      items = try await provider.list(folder)
+      let listed = try await provider.list(folder)
+      guard epoch == loadEpoch, !Task.isCancelled else { return }
+      items = listed
+      refreshCachedSet()
     } catch {
+      guard epoch == loadEpoch else { return }
       message = error.localizedDescription
+      loadRetryFolder = folder
     }
   }
 
@@ -340,9 +403,24 @@ struct CloudBrowserView: View {
     router.openPreviewReader(payload)
   }
 
-  private func isCached(_ item: CloudBrowserItem) -> Bool {
-    guard let provider, let folder = currentFolder, item.isReadable else { return false }
-    guard let url = URL(string: provider.chapterPath(for: item, folder: folder)) else { return false }
-    return WebDAVCache.shared.chapterCacheURL(for: url) != nil
+  private func cachePath(for item: CloudBrowserItem) -> String? {
+    guard let provider, let folder = currentFolder, item.isReadable else { return nil }
+    return provider.chapterPath(for: item, folder: folder)
+  }
+
+  /// 目录加载后一次性算出“已缓存”集合；之前每个文件行 body 都要做一次 SHA256 + 文件检查。
+  private func refreshCachedSet() {
+    guard let provider, let folder = currentFolder else {
+      cachedPaths = []
+      return
+    }
+    var result: Set<String> = []
+    for item in items where item.isReadable {
+      let path = provider.chapterPath(for: item, folder: folder)
+      if let url = URL(string: path), WebDAVCache.shared.chapterCacheURL(for: url) != nil {
+        result.insert(path)
+      }
+    }
+    cachedPaths = result
   }
 }

@@ -26,6 +26,8 @@ struct AddSourceSheet: View {
   // 天翼：登录流绑定的账号（新建占位或 existing）
   @State private var cloudSource: SourceEntity?
   @State private var cloudCreatedHere = false
+  /// 成功完成（保存/登录）后置 true；下滑关闭时据此判断是否要清理占位账号。
+  @State private var finished = false
 
   private var title: String {
     switch phase {
@@ -64,6 +66,7 @@ struct AddSourceSheet: View {
       }
     }
     .interactiveDismissDisabled(busy)
+    .onDisappear { cleanupPlaceholderIfNeeded() }
     .onAppear {
       guard let existing else { return }
       switch existing.kind {
@@ -232,6 +235,7 @@ struct AddSourceSheet: View {
         Keychain.set(password, account: source.passwordAccount)
       }
       try? libraryService.modelContext.save()
+      finished = true
       onFinished(source)
       dismiss()
     } else {
@@ -241,6 +245,7 @@ struct AddSourceSheet: View {
         password: password.isEmpty ? nil : password
       ) {
       case .success(let source):
+        finished = true
         onFinished(source)
         dismiss()
       case .failure(let failure):
@@ -280,17 +285,23 @@ struct AddSourceSheet: View {
       }
     }
     try? libraryService.modelContext.save()
+    finished = true
     cloudCreatedHere = false
     onFinished(source)
     dismiss()
   }
 
-  /// 取消：新建的天翼占位账号（未登录成功）要清掉，避免留下空账号
+  /// 取消：新建的天翼占位账号（未登录成功）要清掉，避免留下空账号。
+  /// 下滑关闭不会走 cancel()，所以 onDisappear 也要做同样的清理。
   private func cancel() {
-    if phase == .cloud189, cloudCreatedHere, let source = cloudSource {
-      libraryService.removeSource(source)
-    }
+    cleanupPlaceholderIfNeeded()
     dismiss()
+  }
+
+  private func cleanupPlaceholderIfNeeded() {
+    guard !finished, cloudCreatedHere, let source = cloudSource else { return }
+    cloudCreatedHere = false
+    libraryService.removeSource(source)
   }
 }
 

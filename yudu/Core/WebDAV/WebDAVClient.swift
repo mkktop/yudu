@@ -83,9 +83,11 @@ nonisolated final class WebDAVClient: @unchecked Sendable {
     return MultistatusParser(base: baseURL, requestURL: url).parse(data)
   }
 
-  /// 验证连接（Depth 0，只要能返回 207 就算通）
-  func verify() async throws {
-    let req = makeRequest(baseURL, method: "PROPFIND", depth: "0", body: Self.propfindBody)
+  /// 验证连接（Depth 0，只要能返回 207 就算通）。
+  /// 账号状态巡检会传入更短超时，避免一个掉线地址拖住整排账号。
+  func verify(timeout: TimeInterval = 30) async throws {
+    var req = makeRequest(baseURL, method: "PROPFIND", depth: "0", body: Self.propfindBody)
+    req.timeoutInterval = timeout
     let (_, response) = try await URLSession.shared.data(for: req)
     guard let http = response as? HTTPURLResponse else { throw WebDAVError.badStatus(-1) }
     guard http.statusCode == 207 else { throw WebDAVError.badStatus(http.statusCode) }

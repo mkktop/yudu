@@ -40,6 +40,8 @@ final class ReaderViewModel {
   /// ObservationIgnored：尺寸字典一变就全体条漫行重渲染是滚动卡顿源，
   /// 行高改为条漫行本地 aspect（init 播种 + 本行探测回调 / 解码回填），字典只喂布局换算与持久化。
   @ObservationIgnored private(set) var dims: [Int: CGSize] = [:]
+  /// dims 每次变化递增；条漫用它判断“页高前缀和”缓存是否需要重建，避免每帧扫全表。
+  @ObservationIgnored private(set) var dimsRevision = 0
   var dimsReadyThrough = -1
   /// 条漫恢复进度中
   var restoringScroll = false
@@ -59,6 +61,8 @@ final class ReaderViewModel {
   private var openEpoch = 0
   /// 已发起尺寸探测的页，避免条漫懒加载重复解压同一页。
   private var dimsRequests: Set<Int> = []
+  /// 下一次进度落库是否跳过“阅读页数”统计（跳页、拖滑条、打开章节的初始落点）。
+  private var progressSeek = false
 
   var isPDF: Bool { current?.isPDF ?? false }
   var effectiveMode: ReaderMode { isPDF ? .webtoon : prefs.mode }
@@ -186,6 +190,7 @@ final class ReaderViewModel {
     page = 0
     pageCount = 0
     dims = [:]
+    dimsRevision &+= 1
     dimsReadyThrough = -1
     restoringScroll = false
 
@@ -236,6 +241,7 @@ final class ReaderViewModel {
     let persistedDims = PageDimsStore.shared.load(sourceID: ref.cacheVersion)
     if !persistedDims.isEmpty {
       dims = persistedDims
+      dimsRevision &+= 1
       var ready = -1
       while ready + 1 < pageCount, dims[ready + 1] != nil { ready += 1 }
       dimsReadyThrough = ready
@@ -254,7 +260,7 @@ final class ReaderViewModel {
     } else {
       landing = pageCount > 0 ? pageCount - 1 : 0 // “上一话末页”落地
     }
-    setPage(landing, animated: false)
+    setPage(landing, animated: false, seek: true)
 
     // 条漫只补目标页附近的尺寸缺口；setPage 已经触发预取，不再重复调用。
     if effectiveMode == .webtoon {
@@ -324,6 +330,7 @@ final class ReaderViewModel {
         self.dimsRequests.remove(index)
         if let value {
           self.dims[index] = value
+          self.dimsRevision &+= 1
           self.scheduleDimsSave()
           onDims?(value)
         }
@@ -334,6 +341,7 @@ final class ReaderViewModel {
   private func applyDim(index: Int, dims: CGSize, epoch: Int) {
     guard epoch == openEpoch, self.dims[index] == nil else { return }
     self.dims[index] = dims
+    dimsRevision &+= 1
     scheduleDimsSave()
   }
 
@@ -342,6 +350,7 @@ final class ReaderViewModel {
     guard index >= 0, index < pageCount, size.width > 0, size.height > 0 else { return }
     guard dims[index] == nil else { return }
     dims[index] = size
+    dimsRevision &+= 1
     if index == dimsReadyThrough + 1 {
       dimsReadyThrough = index
     }
@@ -376,11 +385,20 @@ final class ReaderViewModel {
 
   // MARK: - 翻页
 
-  func setPage(_ newPage: Int, animated: Bool = true) {
+  func setPage(_ newPage: Int, animated: Bool = true, seek: Bool = false) {
     let clamped = pageCount > 0 ? min(max(newPage, 0), pageCount - 1) : max(newPage, 0)
+    if seek { progressSeek = true }
     page = clamped
     scheduleProgressWrite()
     prefetch(around: clamped)
+  }
+
+  /// 跳页/拖滑条：更新进度但不把跨过的页数计入阅读统计。
+  func jumpToPage(_ newPage: Int) {
+    setPage(newPage, seek: true)
+    if effectiveMode == .webtoon {
+      startDimsProbe(around: page)
+    }
   }
 
   /// 单页模式点按/滑动翻页：越界自动跨话
@@ -391,7 +409,9 @@ final class ReaderViewModel {
     } else if direction > 0, nextChapter != nil {
       Task { await goToChapter(offset: 1, landing: 0) }
     } else if direction < 0, prevChapter != nil {
-      Task { await goToChapter(offset: -1, landing: -1) } // 上一话末页
+      // 与底栏「上一话」保持一致：回到续读位置，而不是末页；
+      // 末页会在 600ms 后被 writeProgress 标成“已读完”，用户只是返回也会误标完成。
+      Task { await goToPreviousChapter() }
     }
   }
 
@@ -485,7 +505,9 @@ final class ReaderViewModel {
     progressTask = nil
     // 打开过程中 page 已清零但当前章节已经切换；此时写入会把旧页码写到新章节。
     guard !isOpenInFlight, pageCount > 0, let entity = chapterEntity else { return }
-    Queries.writeProgress(chapter: entity, page: page, context: context)
+    let seek = progressSeek
+    progressSeek = false
+    Queries.writeProgress(chapter: entity, page: page, context: context, countPages: !seek)
   }
 
   // MARK: - 偏好切换（按系列记忆）

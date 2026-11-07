@@ -98,10 +98,13 @@ enum Queries {
   // MARK: 章节
 
   static func orderedChapters(_ series: SeriesEntity) -> [ChapterEntity] {
-    (series.chapters).sorted { a, b in
-      if a.sortIndex != b.sortIndex { return a.sortIndex < b.sortIndex }
-      return a.persistentModelID.hashValue < b.persistentModelID.hashValue
-    }
+    (series.chapters).sorted(by: orderedBefore)
+  }
+
+  /// 与 orderedChapters 相同的顺序规则；供不需要整体排序的单遍扫描复用。
+  private static func orderedBefore(_ a: ChapterEntity, _ b: ChapterEntity) -> Bool {
+    if a.sortIndex != b.sortIndex { return a.sortIndex < b.sortIndex }
+    return a.persistentModelID.hashValue < b.persistentModelID.hashValue
   }
 
   static func chaptersRef(_ series: SeriesEntity) -> [ChapterRef] {
@@ -134,20 +137,46 @@ enum Queries {
     )
   }
 
-  /// 桌面版同款“继续阅读”规则：最近在读未读完 → 第一话未读完 → 最后一话
+  /// 桌面版同款“继续阅读”规则：最近在读未读完 → 第一话未读完 → 最后一话。
+  /// 单遍扫描，不排序：书架/详情页会频繁调用，避免每次 body 求值都 sort 整份目录。
   static func continueTarget(_ series: SeriesEntity) -> ChapterEntity? {
-    let chapters = orderedChapters(series)
+    let chapters = series.chapters
     guard !chapters.isEmpty else { return nil }
 
-    if let inProgress = chapters
-      .filter({ $0.progress != nil && $0.progress?.completed == false })
-      .max(by: { ($0.progress?.updatedAt ?? .distantPast) < ($1.progress?.updatedAt ?? .distantPast) }) {
-      return inProgress
+    var inProgress: ChapterEntity?
+    var inProgressDate = Date.distantPast
+    var firstUnfinished: ChapterEntity?
+    var last: ChapterEntity?
+
+    for chapter in chapters {
+      if let progress = chapter.progress {
+        if !progress.completed, progress.updatedAt > inProgressDate {
+          inProgressDate = progress.updatedAt
+          inProgress = chapter
+        }
+        if !progress.completed,
+           firstUnfinished == nil || orderedBefore(chapter, firstUnfinished!) {
+          firstUnfinished = chapter
+        }
+      } else if firstUnfinished == nil || orderedBefore(chapter, firstUnfinished!) {
+        firstUnfinished = chapter
+      }
+      if last == nil || orderedBefore(last!, chapter) {
+        last = chapter
+      }
     }
-    if let firstUnfinished = chapters.first(where: { $0.progress?.completed != true }) {
-      return firstUnfinished
+    return inProgress ?? firstUnfinished ?? last
+  }
+
+  /// 系列第一话（按话序），封面等只需要第一话的场景使用；不排序整份目录。
+  static func firstChapter(_ series: SeriesEntity) -> ChapterEntity? {
+    var first: ChapterEntity?
+    for chapter in series.chapters {
+      if first == nil || orderedBefore(chapter, first!) {
+        first = chapter
+      }
     }
-    return chapters.last
+    return first
   }
 
   /// 进入时落在哪一页：读完（或停在末页）则从头，否则停在进度页。
@@ -180,21 +209,33 @@ enum Queries {
   }
 
   static func info(_ series: SeriesEntity) -> SeriesInfo {
-    let chapters = orderedChapters(series)
+    // 只扫一遍章节：书架一次 body 会查询全部系列，之前这里还额外排序、两次 filter，
+    // 大库 + 搜索输入时会被放大成明显卡顿。
+    let chapters = series.chapters
     let total = chapters.count
-    let read = chapters.filter { $0.progress?.completed == true }.count
-    let partial = chapters.filter { $0.progress != nil && $0.progress?.completed != true }
+    var read = 0
+    var hasPartial = false
+    var partialFraction = 0.0
+
+    for chapter in chapters {
+      guard let progress = chapter.progress else { continue }
+      if progress.completed {
+        read += 1
+      } else {
+        hasPartial = true
+        if chapter.pageCount > 0 {
+          partialFraction += min(Double(progress.page + 1) / Double(chapter.pageCount), 0.99)
+        }
+      }
+    }
+
     let status: ShelfStatus
     if total > 0 && read == total {
       status = .finished
-    } else if read > 0 || !partial.isEmpty {
+    } else if read > 0 || hasPartial {
       status = .reading
     } else {
       status = .unread
-    }
-    let partialFraction = partial.reduce(0.0) { sum, chapter in
-      guard chapter.pageCount > 0, let progress = chapter.progress else { return sum }
-      return sum + min(Double(progress.page + 1) / Double(chapter.pageCount), 0.99)
     }
     let fraction = total == 0 ? 0 : min((Double(read) + partialFraction) / Double(total), read == total ? 1 : 0.99)
     return SeriesInfo(series: series, total: total, read: read, status: status, fraction: fraction)
@@ -211,10 +252,16 @@ enum Queries {
   }
 
   static func continueItems(_ seriesList: [SeriesEntity], limit: Int = 12) -> [ContinueItem] {
-    let recent = seriesList
-      .filter { $0.lastReadAt != nil && info($0).status == .reading }
-      .sorted { ($0.lastReadAt ?? .distantPast) > ($1.lastReadAt ?? .distantPast) }
-    return Array(recent.compactMap { series -> ContinueItem? in
+    continueItems(seriesList.map(info), limit: limit)
+  }
+
+  /// 书架已经算好了 SeriesInfo，直接复用，避免续读区再对每部漫画重算一遍进度。
+  static func continueItems(_ infos: [SeriesInfo], limit: Int = 12) -> [ContinueItem] {
+    let recent = infos
+      .filter { $0.series.lastReadAt != nil && $0.status == .reading }
+      .sorted { ($0.series.lastReadAt ?? .distantPast) > ($1.series.lastReadAt ?? .distantPast) }
+    return Array(recent.compactMap { info -> ContinueItem? in
+      let series = info.series
       guard let chapter = continueTarget(series) else { return nil }
       return ContinueItem(
         id: series.persistentModelID, series: series, chapter: chapter,
@@ -265,7 +312,10 @@ enum Queries {
 
   // MARK: 进度写入
 
-  static func writeProgress(chapter: ChapterEntity, page: Int, context: ModelContext) {
+  /// countPages = false 用于跳页/拖滑条：页码照常更新，但不把跨过的页数计入阅读统计。
+  static func writeProgress(
+    chapter: ChapterEntity, page: Int, context: ModelContext, countPages: Bool = true
+  ) {
     let count = chapter.pageCount
     var completed = false
     if count > 0, page >= count - 1 { completed = true }
@@ -284,13 +334,33 @@ enum Queries {
     }
     chapter.series?.lastReadAt = .now
 
-    if delta > 0 {
-      context.insert(ReadingLogEntity(day: Self.dayKey(.now), pages: delta))
+    if countPages, delta > 0 {
+      addReadingLog(pages: delta, context: context)
     }
     try? context.save()
   }
 
+  /// 进度流水按天合并成一行：之前每次翻页插入一条，长期阅读后统计页要扫描大量行。
+  private static func addReadingLog(pages: Int, context: ModelContext) {
+    let today = dayKey(.now)
+    let descriptor = FetchDescriptor<ReadingLogEntity>(predicate: #Predicate { $0.day == today })
+    if let existing = try? context.fetch(descriptor).first {
+      existing.pages += pages
+      existing.at = .now
+    } else {
+      context.insert(ReadingLogEntity(day: today, pages: pages))
+    }
+  }
+
   static func setCompleted(_ chapter: ChapterEntity, completed: Bool, context: ModelContext) {
+    applyCompletion(chapter, completed: completed, context: context)
+    try? context.save()
+  }
+
+  /// 批量标记已读时只改模型，最后统一保存一次；避免每话一次主线程落库。
+  private static func applyCompletion(
+    _ chapter: ChapterEntity, completed: Bool, context: ModelContext
+  ) {
     if completed {
       let p: ProgressEntity
       if let existing = chapter.progress {
@@ -308,13 +378,13 @@ enum Queries {
       context.delete(p)
     }
     chapter.series?.lastReadAt = .now
-    try? context.save()
   }
 
   static func markAllRead(_ series: SeriesEntity, context: ModelContext) {
-    for chapter in orderedChapters(series) {
-      setCompleted(chapter, completed: true, context: context)
+    for chapter in series.chapters {
+      applyCompletion(chapter, completed: true, context: context)
     }
+    try? context.save()
   }
 
   static func resetProgress(_ series: SeriesEntity, context: ModelContext) {

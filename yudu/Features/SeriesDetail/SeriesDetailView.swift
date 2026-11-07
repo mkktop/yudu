@@ -9,6 +9,7 @@ struct SeriesDetailView: View {
   @State private var collapsedVolumes: Set<String> = []
   @State private var showResetConfirm = false
   @State private var showDeleteConfirm = false
+  @State private var showMarkAllConfirm = false
   @State private var unreadOnly = false
   @State private var reverseOrder = false
   @State private var refreshTick = 0
@@ -18,9 +19,8 @@ struct SeriesDetailView: View {
     var volume: String?
     var chapters: [ChapterEntity]
   }
-  private var orderedChapters: [ChapterEntity] { Queries.orderedChapters(series) }
-  private var groups: [VolumeGroup] {
-    let visible = orderedChapters.filter { !unreadOnly || $0.progress?.completed != true }
+  private func groups(from ordered: [ChapterEntity]) -> [VolumeGroup] {
+    let visible = ordered.filter { !unreadOnly || $0.progress?.completed != true }
     let chapters = reverseOrder ? Array(visible.reversed()) : visible
     var result: [VolumeGroup] = []
     for chapter in chapters {
@@ -33,14 +33,18 @@ struct SeriesDetailView: View {
 
   var body: some View {
     let _ = refreshTick
-    let targetID = Queries.continueTarget(series)?.persistentModelID
-    let groupList = groups
+    // 一次 body 只排序/扫描一次目录。之前 orderedChapters、groups、hero 各算一遍。
+    let ordered = Queries.orderedChapters(series)
+    let target = Queries.continueTarget(series)
+    let targetID = target?.persistentModelID
+    let info = Queries.info(series)
+    let groupList = groups(from: ordered)
     ScrollViewReader { proxy in
       ScrollView {
         LazyVStack(alignment: .leading, spacing: 24) {
-          hero
+          hero(info: info, target: target, firstChapter: ordered.first)
           HStack {
-            SectionHeading(title: "章节目录", eyebrow: "CHAPTER INDEX", detail: "\(orderedChapters.count) 话")
+            SectionHeading(title: "章节目录", eyebrow: "CHAPTER INDEX", detail: "\(ordered.count) 话")
             Button { reverseOrder.toggle() } label: {
               Image(systemName: "arrow.up.arrow.down").frame(width: 44, height: 44)
             }
@@ -49,7 +53,7 @@ struct SeriesDetailView: View {
           HStack(spacing: 12) {
             Toggle("只看未读", isOn: $unreadOnly).font(.caption).toggleStyle(.switch)
             Spacer(minLength: 10)
-            if let target = Queries.continueTarget(series) {
+            if let target {
               Button("定位续读") {
                 unreadOnly = false
                 collapsedVolumes.remove(target.volume ?? "…")
@@ -62,7 +66,7 @@ struct SeriesDetailView: View {
             }
           }
           if groupList.isEmpty {
-            NoticeView(title: orderedChapters.isEmpty ? "还没有可读章节" : "所有章节都已读完", message: orderedChapters.isEmpty ? "返回书架下拉刷新，或到书库检查来源。" : "关闭「只看未读」可以重新阅读。", icon: "book.closed")
+            NoticeView(title: ordered.isEmpty ? "还没有可读章节" : "所有章节都已读完", message: ordered.isEmpty ? "返回书架下拉刷新，或到书库检查来源。" : "关闭「只看未读」可以重新阅读。", icon: "book.closed")
           }
           ForEach(groupList) { group in
             LazyVStack(spacing: 0) {
@@ -98,7 +102,7 @@ struct SeriesDetailView: View {
         ToolbarItem(placement: .topBarTrailing) {
           Menu {
             Button("全部标记已读", systemImage: "checkmark.circle") {
-              Queries.markAllRead(series, context: context); refreshTick += 1
+              showMarkAllConfirm = true
             }
             Button("重置阅读进度", systemImage: "arrow.counterclockwise", role: .destructive) { showResetConfirm = true }
             if series.library?.kind == "imports" {
@@ -119,11 +123,18 @@ struct SeriesDetailView: View {
         }
         Button("取消", role: .cancel) {}
       } message: { Text("将删除导入时拷贝的文件与全部进度。") }
+      .confirmationDialog("全部标记已读？", isPresented: $showMarkAllConfirm, titleVisibility: .visible) {
+        Button("全部标记已读") {
+          Queries.markAllRead(series, context: context)
+          refreshTick += 1
+        }
+        Button("取消", role: .cancel) {}
+      } message: { Text("会把本书所有章节标记为已读完，阅读统计不会增加。") }
     }
   }
 
-  private var hero: some View {
-    let info = Queries.info(series)
+  private func hero(info: Queries.SeriesInfo, target: ChapterEntity?, firstChapter: ChapterEntity?) -> some View {
+    let readTarget = info.status == .finished ? firstChapter : target
     return VStack(alignment: .leading, spacing: 20) {
       HStack(alignment: .top, spacing: 18) {
         CoverImage(seriesKey: series.key, title: series.title)
@@ -145,14 +156,14 @@ struct SeriesDetailView: View {
         }
         ProgressView(value: info.fraction).tint(YuduTheme.accent)
       }
-      if let target = info.status == .finished ? orderedChapters.first : Queries.continueTarget(series) {
+      if let readTarget {
         Button {
-          router.openReader(series: series, startChapter: target)
+          router.openReader(series: series, startChapter: readTarget)
         } label: {
           HStack(spacing: 10) {
             Image(systemName: "play.fill")
             Text(info.status == .unread ? "开始阅读" : (info.status == .finished ? "再次阅读" : "继续阅读"))
-            Text("· \(target.title)").font(.caption).lineLimit(1).opacity(0.75)
+            Text("· \(readTarget.title)").font(.caption).lineLimit(1).opacity(0.75)
           }.padding(.horizontal, 14)
         }
         .buttonStyle(OrbitalButtonStyle())

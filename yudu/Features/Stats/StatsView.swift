@@ -12,20 +12,20 @@ struct StatsView: View {
     var id: String { rawValue }
     var weeks: Int { self == .halfYear ? 26 : 53 }
   }
-  private var summary: Queries.StatsSummary { Queries.stats(logs: logs) }
-
   var body: some View {
+    // 一次 body 只聚合一次；之前 summary 被 todayCard / 两个 metric / weekChart / heatmap 各算一遍。
+    let summary = Queries.stats(logs: logs)
     NavigationStack {
       ScrollView {
         VStack(alignment: .leading, spacing: 24) {
           SectionHeading(title: "每一页，都算数。", eyebrow: "READING SIGNAL")
-          todayCard
+          todayCard(summary)
           HStack(spacing: 12) {
             metric(title: "累计阅读", value: summary.totalPages.formatted(), unit: "页", icon: "book.pages")
             metric(title: "阅读天数", value: "\(summary.totalDays)", unit: "天", icon: "calendar")
           }
-          weekChart
-          heatmap
+          weekChart(summary)
+          heatmap(summary)
           if logs.isEmpty {
             NoticeView(title: "从第一话开始，点亮你的轨迹", message: "阅读时自动记录翻页。手动标记已读不会计入阅读页数。", icon: "sparkles")
           }
@@ -37,7 +37,7 @@ struct StatsView: View {
     }
   }
 
-  private var todayCard: some View {
+  private func todayCard(_ summary: Queries.StatsSummary) -> some View {
     let pages = summary.days[Queries.dayKey(.now)] ?? 0
     let fraction = min(Double(pages) / Double(max(dailyGoal, 1)), 1)
     return HStack(spacing: 22) {
@@ -71,7 +71,7 @@ struct StatsView: View {
     }.frame(maxWidth: .infinity, alignment: .leading).padding(18).yuduPanel()
   }
 
-  private var recentDays: [(date: Date, pages: Int)] {
+  private func recentDays(_ summary: Queries.StatsSummary) -> [(date: Date, pages: Int)] {
     let calendar = Calendar.current
     return (-6...0).compactMap { offset in
       guard let date = calendar.date(byAdding: .day, value: offset, to: .now) else { return nil }
@@ -79,8 +79,8 @@ struct StatsView: View {
     }
   }
 
-  private var weekChart: some View {
-    let days = recentDays
+  private func weekChart(_ summary: Queries.StatsSummary) -> some View {
+    let days = recentDays(summary)
     let highest = max(days.map(\.pages).max() ?? 0, 1)
     return VStack(alignment: .leading, spacing: 20) {
       SectionHeading(title: "最近七天", eyebrow: "WEEKLY ACTIVITY", detail: "\(days.reduce(0) { $0 + $1.pages }) 页")
@@ -102,9 +102,9 @@ struct StatsView: View {
     }.padding(18).yuduPanel()
   }
 
-  private var heatmap: some View {
+  private func heatmap(_ summary: Queries.StatsSummary) -> some View {
     let weeks = Self.weekBuckets(summary.days, weeks: range.weeks)
-    let selected = selectedInfo
+    let selected = selectedInfo(summary)
     return VStack(alignment: .leading, spacing: 16) {
       SectionHeading(title: "阅读轨迹", eyebrow: "YOUR CONSTELLATION")
       Picker("热力图时间范围", selection: $range) {
@@ -162,7 +162,7 @@ struct StatsView: View {
   }
 
   /// 当前选中日期的展示信息。
-  private var selectedInfo: (title: String, pages: Int) {
+  private func selectedInfo(_ summary: Queries.StatsSummary) -> (title: String, pages: Int) {
     let pages = summary.days[selectedDay] ?? 0
     let title: String
     if let parts = Self.dayParts(selectedDay) {

@@ -37,6 +37,10 @@ struct QueriesChecks {
     expect(abs(Queries.info(series).fraction - 0.1) < 0.001, "单话部分进度应计入全书百分比")
     expect(Queries.resumePage(first) == 19, "续读恢复页码")
     expect(Queries.continueItems([series]).first?.chapter === first, "续读卡和阅读器使用同一目标")
+    expect(
+      Queries.continueItems([Queries.info(series)]).first?.chapter === first,
+      "书架已算好的 SeriesInfo 续读结果应与模型查询一致"
+    )
     Queries.setCompleted(first, completed: true, context: context)
     expect(Queries.continueTarget(series) === second, "一话完成后选择下一未完成话")
     expect(Queries.continueItems([series]).first?.chapter === second, "续读卡不能停留在上一已完成话")
@@ -69,6 +73,14 @@ struct QueriesChecks {
     expect(Queries.resumePage(cloudChapter) == 19, "阅读器回填页数后续读位置保持")
     Queries.writeProgress(chapter: cloudChapter, page: 3, context: context)
     expect(cloudChapter.progress?.page == 3, "页数已知后正常按页写入")
+
+    // 跳页/拖滑条只更新进度，不能把跨过的页数算进阅读统计。
+    let logsBeforeSeek = (try? context.fetch(FetchDescriptor<ReadingLogEntity>())) ?? []
+    let pagesBeforeSeek = logsBeforeSeek.reduce(0) { $0 + $1.pages }
+    Queries.writeProgress(chapter: cloudChapter, page: 40, context: context, countPages: false)
+    let logsAfterSeek = (try? context.fetch(FetchDescriptor<ReadingLogEntity>())) ?? []
+    expect(logsAfterSeek.count == logsBeforeSeek.count, "跳页不应新增阅读流水")
+    expect(logsAfterSeek.reduce(0) { $0 + $1.pages } == pagesBeforeSeek, "跳页不应增加阅读页数")
 
     // 删除章节必须级联删除进度（deleteRule: .cascade），否则库会积累孤儿进度行。
     let progressCountBefore = (try? context.fetch(FetchDescriptor<ProgressEntity>()))?.count ?? 0

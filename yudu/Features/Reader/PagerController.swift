@@ -18,6 +18,11 @@ struct ReaderPager: UIViewControllerRepresentable {
   var fit: ReaderFit
   var source: any PageSource
   var sourceID: String
+  /// 首/末页再往外滑时是否还有上一话/下一话可去
+  var hasPreviousChapter: Bool
+  var hasNextChapter: Bool
+  /// 在章节边界卡片上点按时回调：1 = 下一话，-1 = 上一话
+  var onChapterChange: (Int) -> Void
   var onPageChanged: (Int) -> Void
   var onPageSize: ((Int, CGSize) -> Void)?
   var onTapSide: (PagerTapSide) -> Void
@@ -49,8 +54,12 @@ struct ReaderPager: UIViewControllerRepresentable {
     ) -> UIViewController? {
       // 交互式滑动开始取邻页：标记过渡中，邻页新解码的大图先扣住不上屏
       controller?.beginSwipeTransition()
+      if let boundary = viewController as? ChapterBoundaryVC {
+        return controller?.makePage(at: boundary.displayIndex - 1)
+      }
       guard let pageVC = viewController as? PageZoomVC else { return nil }
-      return controller?.makePage(at: pageVC.displayIndex - 1)
+      if let page = controller?.makePage(at: pageVC.displayIndex - 1) { return page }
+      return controller?.makeBoundaryPage(at: pageVC.displayIndex - 1)
     }
 
     func pageViewController(
@@ -58,8 +67,12 @@ struct ReaderPager: UIViewControllerRepresentable {
       viewControllerAfter viewController: UIViewController
     ) -> UIViewController? {
       controller?.beginSwipeTransition()
+      if let boundary = viewController as? ChapterBoundaryVC {
+        return controller?.makePage(at: boundary.displayIndex + 1)
+      }
       guard let pageVC = viewController as? PageZoomVC else { return nil }
-      return controller?.makePage(at: pageVC.displayIndex + 1)
+      if let page = controller?.makePage(at: pageVC.displayIndex + 1) { return page }
+      return controller?.makeBoundaryPage(at: pageVC.displayIndex + 1)
     }
 
     func pageViewController(
@@ -152,6 +165,27 @@ final class PagerController: UIViewController {
       props.onTapSide(side)
     }
     return vc
+  }
+
+  /// 首/末页继续外滑时的“跨话卡片”。displayIndex 为合成位置（-1 或 pageCount），
+  /// 只承载一个按钮，不参与页码/进度换算；从卡片往回滑会回到原来的首/末页。
+  func makeBoundaryPage(at displayIndex: Int) -> UIViewController? {
+    guard let props, props.pageCount > 0 else { return nil }
+    let direction: Int
+    if displayIndex < 0 {
+      // 第一张显示页之前：LTR 是“上一话”，RTL 是“下一话”
+      direction = props.rtl ? 1 : -1
+    } else if displayIndex >= props.pageCount {
+      // 最后一张显示页之后：LTR 是“下一话”，RTL 是“上一话”
+      direction = props.rtl ? -1 : 1
+    } else {
+      return nil
+    }
+    guard direction > 0 ? props.hasNextChapter : props.hasPreviousChapter else { return nil }
+    let handler = props.onChapterChange
+    return ChapterBoundaryVC(displayIndex: displayIndex, direction: direction) {
+      handler(direction)
+    }
   }
 
   private func reload() {
@@ -463,5 +497,58 @@ final class PageZoomVC: UIViewController, UIScrollViewDelegate {
       let y = max(0, min(point.y - h / 2, image.size.height - h))
       scrollView.zoom(to: CGRect(x: x, y: y, width: w, height: h), animated: true)
     }
+  }
+}
+
+// MARK: - 章节边界卡片
+
+/// 单页模式首/末页继续外滑时出现的跨话卡片。
+/// 合成位置在真实页之外（-1 / pageCount），因此不会改变页码或进度；
+/// 点按进入相邻章节，往回滑仍回到原来的首/末页。
+@MainActor
+final class ChapterBoundaryVC: UIViewController {
+  /// 合成位置，供 UIPageViewController 往回/往前取真实页
+  let displayIndex: Int
+  private let direction: Int
+  private let onContinue: () -> Void
+
+  init(displayIndex: Int, direction: Int, onContinue: @escaping () -> Void) {
+    self.displayIndex = displayIndex
+    self.direction = direction
+    self.onContinue = onContinue
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = .black
+
+    var config = UIButton.Configuration.filled()
+    config.title = direction > 0 ? "进入下一话" : "返回上一话"
+    config.subtitle = direction > 0 ? "已到本话末页" : "已到本话开头"
+    config.titleAlignment = .center
+    config.baseBackgroundColor = UIColor(red: 0.455, green: 0.902, blue: 0.859, alpha: 1)
+    config.baseForegroundColor = .black
+    config.cornerStyle = .large
+    config.contentInsets = NSDirectionalEdgeInsets(top: 18, leading: 28, bottom: 18, trailing: 28)
+
+    let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
+      self?.onContinue()
+    })
+    button.translatesAutoresizingMaskIntoConstraints = false
+    button.accessibilityLabel = direction > 0 ? "进入下一话" : "返回上一话"
+    view.addSubview(button)
+
+    let width = button.widthAnchor.constraint(equalToConstant: 280)
+    width.priority = .defaultHigh
+    NSLayoutConstraint.activate([
+      button.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+      button.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+      width,
+      button.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+      button.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+    ])
   }
 }

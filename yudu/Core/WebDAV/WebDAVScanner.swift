@@ -247,7 +247,7 @@ nonisolated enum WebDAVScanner {
 nonisolated final class WebDAVCache: @unchecked Sendable {
   static let shared = WebDAVCache()
 
-  struct Entry: Codable {
+  struct Entry: Codable, Sendable {
     var url: String
     var seriesKey: String
     var size: Int64
@@ -265,6 +265,9 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
   private var protectedSeries: Set<String> = []
   /// 同一章节并发请求只下载一次。
   private var inflight: [String: Task<URL, Error>] = [:]
+  /// 清单落盘串行队列：读页/写图时不阻塞调用线程。
+  private let ioQueue = DispatchQueue(label: "com.mkk.yudu.webdav-cache-io", qos: .utility)
+  private var pendingPersist = false
 
   static let capKey = "webdavCacheCapBytes"
   static let pinnedKey = "webdavPinnedSeries"
@@ -296,6 +299,14 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
       manifest = decoded
     } else {
       manifest = [:]
+    }
+    // debounce 期间退到后台时补一次落盘，避免清单长时间不写。
+    for name in [UIApplication.didEnterBackgroundNotification, UIApplication.willTerminateNotification] {
+      NotificationCenter.default.addObserver(
+        forName: name, object: nil, queue: nil
+      ) { [weak self] _ in
+        self?.persistManifestNow()
+      }
     }
   }
 
@@ -363,7 +374,7 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
         lock.withLock {
           manifest[key] = Entry(url: stableKey, seriesKey: seriesKey, size: size, at: .now, version: version)
         }
-        persistManifest()
+        persistManifestNow()
         evictIfNeeded()
         return target
       }
@@ -412,7 +423,7 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
       lock.lock()
       manifest["img-" + key] = Entry(url: url.absoluteString, seriesKey: seriesKey, size: Int64(data.count), at: .now)
       lock.unlock()
-      persistManifest()
+      persistManifestSoon()
     }
   }
 
@@ -436,7 +447,7 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
                  extensions: MediaSniff.imageExtensions.union(["zip", "cbz", "pdf"]),
                  bothDirs: true)
     }
-    persistManifest()
+    persistManifestNow()
   }
 
   func clearAll() {
@@ -447,7 +458,7 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
     try? FileManager.default.removeItem(at: dir)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     try? FileManager.default.createDirectory(at: imgDir, withIntermediateDirectories: true)
-    persistManifest()
+    persistManifestNow()
     pinnedSeries = []
   }
 
@@ -479,7 +490,7 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
                  extensions: MediaSniff.imageExtensions.union(["zip", "cbz", "pdf"]),
                  bothDirs: true)
     }
-    persistManifest()
+    persistManifestNow()
   }
 
   private func deleteFile(key: String, extensions: Set<String>, bothDirs: Bool) {
@@ -497,15 +508,32 @@ nonisolated final class WebDAVCache: @unchecked Sendable {
       manifest[key]?.at = .now
     }
     lock.unlock()
-    persistManifest()
+    persistManifestSoon()
   }
 
-  private func persistManifest() {
-    lock.lock()
-    let snapshot = manifest
-    lock.unlock()
-    if let data = try? JSONEncoder().encode(snapshot) {
-      try? data.write(to: manifestURL, options: .atomic)
+  /// 结构性变化（章节下载完成、清理、移除书库）立即排队落盘。
+  private func persistManifestNow() {
+    let snapshot = lock.withLock { manifest }
+    let url = manifestURL
+    ioQueue.async {
+      if let data = try? JSONEncoder().encode(snapshot) {
+        try? data.write(to: url, options: .atomic)
+      }
+    }
+  }
+
+  /// 高频变化（散图写入、浏览命中刷新 LRU）合并成 1 秒一次，避免每页都重写整份清单。
+  private func persistManifestSoon() {
+    let shouldSchedule: Bool = lock.withLock {
+      if pendingPersist { return false }
+      pendingPersist = true
+      return true
+    }
+    guard shouldSchedule else { return }
+    ioQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+      guard let self else { return }
+      self.lock.withLock { self.pendingPersist = false }
+      self.persistManifestNow()
     }
   }
 }

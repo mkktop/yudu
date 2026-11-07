@@ -121,6 +121,17 @@ struct ReaderView: View {
         fit: vm.prefs.fit,
         source: source,
         sourceID: vm.sourceID,
+        hasPreviousChapter: vm.prevChapter != nil,
+        hasNextChapter: vm.nextChapter != nil,
+        onChapterChange: { direction in
+          Task {
+            if direction > 0 {
+              await vm.goToChapter(offset: 1, landing: 0)
+            } else {
+              await vm.goToPreviousChapter()
+            }
+          }
+        },
         onPageChanged: { vm.setPage($0) },
         onPageSize: { index, size in vm.recordPageSize(index: index, size: size) },
         onTapSide: { side in
@@ -442,7 +453,7 @@ struct ReaderView: View {
         ) { editing in
           scrubbing = editing
           if !editing {
-            vm.setPage(Int(localPage.rounded()))
+            vm.jumpToPage(Int(localPage.rounded()))
           }
         }
         .tint(YuduTheme.accent)
@@ -493,7 +504,7 @@ struct ReaderView: View {
           }
           ToolbarItem(placement: .confirmationAction) {
             Button("前往") {
-              if let validPage { vm.setPage(validPage - 1) }
+              if let validPage { vm.jumpToPage(validPage - 1) }
               dismiss()
             }
             .disabled(validPage == nil)
@@ -513,6 +524,8 @@ struct ReaderView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+      // 一次 body 只建一次路径索引；之前每个可见行都会重建整份字典。
+      let entities = entitiesByPath
       NavigationStack {
         List {
           ForEach(vm.chapters) { chapter in
@@ -533,7 +546,7 @@ struct ReaderView: View {
                   }
                 }
                 Spacer()
-                statusIcon(for: chapter)
+                statusIcon(for: chapter, entity: entities[chapter.path])
               }
             }
             .listRowBackground(
@@ -559,13 +572,15 @@ struct ReaderView: View {
     }
 
     @ViewBuilder
-    private func statusIcon(for chapter: ChapterRef) -> some View {
-      let entity = entitiesByPath[chapter.path]
+    private func statusIcon(for chapter: ChapterRef, entity: ChapterEntity?) -> some View {
       if entity?.progress?.completed == true {
         Image(systemName: "checkmark.circle.fill")
           .foregroundStyle(.green)
       } else if let p = entity?.progress {
-        Text("第 \(min(p.page + 1, max(chapter.pageCount, 1))) 页")
+        // 云端章节页数未知（0）时不能拿 1 当上限，否则读到第 50 页也只显示“第 1 页”。
+        Text(chapter.pageCount > 0
+          ? "第 \(min(p.page + 1, chapter.pageCount)) 页"
+          : "读到第 \(p.page + 1) 页")
           .font(.caption)
           .foregroundStyle(.secondary)
       }

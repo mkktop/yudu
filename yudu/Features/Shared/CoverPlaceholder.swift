@@ -73,6 +73,30 @@ struct PlaceholderCoverView: View {
 
 // MARK: - 封面图（磁盘缓存 + 生成中重试 + 占位回退）
 
+/// 封面内存缓存 + 后台降采样解码。
+/// 之前在主线程 `UIImage(contentsOfFile:)`，封面网格滚动时每个新出现的格子都占主线程。
+nonisolated final class CoverImageCache: @unchecked Sendable {
+  static let shared = CoverImageCache()
+
+  private let cache = NSCache<NSString, UIImage>()
+
+  private init() {
+    cache.countLimit = 160
+    cache.totalCostLimit = 64 << 20
+  }
+
+  func image(for url: URL, version: Int) -> UIImage? {
+    let key = "\(url.path)#\(version)" as NSString
+    if let hit = cache.object(forKey: key) { return hit }
+    guard let image = ImageDecode.image(from: url, maxPixel: 600) else { return nil }
+    cache.setObject(
+      image, forKey: key,
+      cost: Int(image.size.width * image.size.height * 4)
+    )
+    return image
+  }
+}
+
 struct CoverImage: View {
   let seriesKey: String
   var title: String = ""
@@ -91,9 +115,15 @@ struct CoverImage: View {
     }
     .task(id: "\(seriesKey)#\(libraryService.coverVersion)") {
       // 封面可能在扫描后几秒内生成，带重试；coverVersion 变化时不重置旧图，避免整墙闪烁。
+      let url = CoverStore.shared.coverURL(seriesKey: seriesKey)
+      let version = libraryService.coverVersion
       for _ in 0..<8 {
         guard !Task.isCancelled else { return }
-        if let loaded = UIImage(contentsOfFile: CoverStore.shared.coverURL(seriesKey: seriesKey).path) {
+        let loaded = await Task.detached(priority: .utility) {
+          CoverImageCache.shared.image(for: url, version: version)
+        }.value
+        guard !Task.isCancelled else { return }
+        if let loaded {
           image = loaded
           return
         }
