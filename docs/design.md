@@ -93,7 +93,7 @@
 
 GitHub Actions 的 `iOS build and reading checks` 执行：
 
-1. 用真实 SwiftData 内存库运行 `tests/QueriesChecks.swift`，覆盖续读章节、部分进度、完成/未读切换、清空进度、历史统计、WebDAV 地址与同源校验、云端章节「页数未知」续读。另有 `tests/ZipChecks.swift` 覆盖 ZIP 解析（合法压缩包读回、畸形 zip64 必须抛错而非崩溃）与文件名解析。
+1. 用真实 SwiftData 内存库运行 `tests/QueriesChecks.swift`，覆盖续读章节、部分进度、完成/未读切换、清空进度、历史统计、WebDAV 地址与同源校验、云端章节「页数未知」续读。另有 `tests/ZipChecks.swift` 覆盖 ZIP 解析（合法压缩包读回、畸形 zip64 必须抛错而非崩溃）与文件名解析；`tests/EntryFlightChecks.swift` 验证条目单飞门的并发语义（同页只加载一次、跨页互不阻塞、失败不缓存、广播唤醒所有等待者）。
 2. Xcode 编译 iOS Simulator App（无签名，发行目标 iOS 18）。
 3. `tools/simulator-smoke.sh` 生成原创本地测试数据（6 个散图系列、1 个 CBZ 系列、1 个 PDF），启动模拟器，走过扫描、详情、单页、恢复进度、条漫、ZIP 阅读、PDF 阅读、续读书架、书库、导入、统计、设置与浅色书架；阅读器打开失败时自测会写入失败标记，截图保存在 workflow artifact。脚本先清理上次数据，可重复运行。
 4. 额外编译 Release，确保自测钩子不进入发行配置。
@@ -105,9 +105,17 @@ GitHub Actions 的 `iOS build and reading checks` 执行：
 ```sh
 xcrun swiftc -swift-version 5 -parse-as-library \
   yudu/Model/Entities.swift yudu/Model/Queries.swift \
-  yudu/Core/WebDAV/WebDAVAddress.swift tests/QueriesChecks.swift \
+  yudu/Core/WebDAV/WebDAVAddress.swift \
+  yudu/Core/MediaSniff.swift yudu/Core/FilenameParser.swift \
+  yudu/Core/ZipFile.swift yudu/Core/Scanner.swift \
+  tests/QueriesChecks.swift \
   -o /tmp/yudu-checks
 /tmp/yudu-checks
+
+xcrun swiftc -swift-version 5 -parse-as-library \
+  yudu/Core/EntrySingleFlight.swift tests/EntryFlightChecks.swift \
+  -o /tmp/yudu-flight-checks
+/tmp/yudu-flight-checks
 
 xcodebuild -project yudu.xcodeproj -scheme yudu \
   -configuration Debug -sdk iphonesimulator \

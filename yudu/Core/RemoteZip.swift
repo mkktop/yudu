@@ -117,6 +117,8 @@ nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
     cache.totalCostLimit = 96 << 20
     return cache
   }()
+  /// 缓存并发 miss 时同页合并成一次 Range 下载（探测与解码同时到达的场景）
+  private let singleFlight = EntrySingleFlight()
 
   enum RemoteZipError: Error, LocalizedError {
     case noRangeSupport
@@ -166,11 +168,9 @@ nonisolated final class RemoteZipPageSource: PageSource, @unchecked Sendable {
 
   private func entryData(at index: Int) -> Data? {
     guard entries.indices.contains(index) else { return nil }
-    let key = NSNumber(value: index)
-    if let hit = entryCache.object(forKey: key) { return hit as Data }
-    guard let data = loadEntryData(at: index) else { return nil }
-    entryCache.setObject(data as NSData, forKey: key, cost: data.count)
-    return data
+    return singleFlight.entryData(at: index, cache: entryCache) { [self] in
+      loadEntryData(at: index)
+    }
   }
 
   /// 单页三段请求：本地头(30B+名长) → 压缩字节 → 解压

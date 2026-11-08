@@ -48,7 +48,8 @@ nonisolated final class PageCache: @unchecked Sendable {
     } else {
       cache.totalCostLimit = 512 << 20
     }
-    cache.countLimit = 80
+    // 数量上限给宽（条漫一章常见一两百页），实际淘汰由上面的内存成本主导
+    cache.countLimit = 240
   }
 
   private static func key(_ sourceID: String, _ index: Int, maxPixel: Int) -> NSString {
@@ -64,6 +65,8 @@ nonisolated final class PageCache: @unchecked Sendable {
   /// 加载本身跑在专用有界线程池，页源里的同步网络桥接不会阻塞 Swift 并发池。
   /// 取消语义：调用方任务被取消即退席；同页的所有等待者都退席后才取消底层解码
   /// （排队中的操作直接跳过），谁先取消都不影响其他还在等的调用方。
+  /// 撞上被撤销的航班（nil）时重试一次新开解码——快速连翻时预取频繁被撤销，
+  /// 跟在其后的前台请求不能把别人的取消当成自己的加载失败。
   func image(
     sourceID: String, index: Int, maxPixel: Int,
     priority: TaskPriority = .userInitiated,
@@ -75,9 +78,30 @@ nonisolated final class PageCache: @unchecked Sendable {
     }
     let interval = Perf.signposter.beginInterval("page-load")
     defer { Perf.signposter.endInterval("page-load", interval) }
+    for _ in 0..<2 {
+      let outcome = await decodeOnce(
+        sourceID: sourceID, index: index, maxPixel: maxPixel,
+        priority: priority, loader: loader
+      )
+      if let image = outcome.image { return image }
+      // 等到 nil 有两种可能：真的解码失败，或等的那班解码已被撤销
+      //（撤销前已开跑的会跑完并落缓存，image 非空，不会走到这里）。
+      // 只有后者才值得重试；真失败重试只会白费一次解码。
+      guard outcome.wasCancelled, !Task.isCancelled else { return nil }
+    }
+    return nil
+  }
+
+  private func decodeOnce(
+    sourceID: String, index: Int, maxPixel: Int,
+    priority: TaskPriority,
+    loader: @escaping @Sendable () -> UIImage?
+  ) async -> (image: UIImage?, wasCancelled: Bool) {
     let key = String(Self.key(sourceID, index, maxPixel: maxPixel))
     let box: InflightBox = lock.withLock {
-      if let existing = inflight[key] { return existing }
+      // 已撤销的航班不复用：它注定返回 nil，等它只会得到假失败。
+      // 换新 box 后旧航班的 finishInflight 有 === 身份判断，不会误删新条目。
+      if let existing = inflight[key], existing.task?.isCancelled != true { return existing }
       let box = InflightBox()
       box.task = Task.detached(priority: priority) { [loader] in
         let image = await PageLoadExecutor.shared.run(priority: priority) {
@@ -105,7 +129,7 @@ nonisolated final class PageCache: @unchecked Sendable {
       box.removeSeat()
     }
     box.removeSeat() // 正常结束也退席
-    return image
+    return (image, box.task?.isCancelled == true)
   }
 
   /// 解码收尾：只有仍是当前那次解码时才清条目（期间可能已被新解码替换）

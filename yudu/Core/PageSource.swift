@@ -223,6 +223,8 @@ nonisolated final class ZipPageSource: PageSource, @unchecked Sendable {
     cache.totalCostLimit = 64 << 20
     return cache
   }()
+  /// 缓存并发 miss 时同页合并成一次解压
+  private let singleFlight = EntrySingleFlight()
 
   init(fileURL: URL) throws {
     self.zip = try ZipFile(url: fileURL)
@@ -237,11 +239,9 @@ nonisolated final class ZipPageSource: PageSource, @unchecked Sendable {
 
   private func entryData(at index: Int) -> Data? {
     guard zip.entries.indices.contains(index) else { return nil }
-    let key = NSNumber(value: index)
-    if let hit = entryCache.object(forKey: key) { return hit as Data }
-    guard let data = zip.entryData(at: index) else { return nil }
-    entryCache.setObject(data as NSData, forKey: key, cost: data.count)
-    return data
+    return singleFlight.entryData(at: index, cache: entryCache) { [zip] in
+      zip.entryData(at: index)
+    }
   }
 
   func pageImage(at index: Int, maxPixel: CGFloat) -> UIImage? {
@@ -402,10 +402,11 @@ enum PageSourceFactory {
           return OpenedSource(source: remote, access: LibraryAccess.shared.begin(url: nil))
         }
       }
-      // 无盘模式：小包直接进内存（先检查大小，避免把大文件整个读进内存）
+      // 无盘模式：小包直接进内存（先检查大小，避免把大文件整个读进内存）。
+      // 上限 150MB：再大就会顶爆低内存设备的可用内存被系统杀掉，宁可落盘缓存。
       if WebDAVCache.shared.diskless,
          let memory = try? await client.fetchData(
-           fileId: parsed.fileId, familyId: parsed.familyId, sizeLimit: 600 * 1024 * 1024
+           fileId: parsed.fileId, familyId: parsed.familyId, sizeLimit: 150 * 1024 * 1024
          ) {
         let memorySource: (any PageSource)? = kind == "pdf"
           ? PdfPageSource(data: memory)
@@ -446,7 +447,7 @@ enum PageSourceFactory {
         }
       }
       if WebDAVCache.shared.diskless,
-         let memory = await client.fetchDataLimited(url, limit: 600 * 1024 * 1024) {
+         let memory = await client.fetchDataLimited(url, limit: 150 * 1024 * 1024) {
         let memorySource: (any PageSource)? = kind == "pdf"
           ? PdfPageSource(data: memory)
           : try? ZipPageSource(data: memory)
