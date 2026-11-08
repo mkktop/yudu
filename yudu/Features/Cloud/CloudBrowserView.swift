@@ -25,13 +25,18 @@ struct CloudBrowserView: View {
   @State private var loadRetryFolder: CloudBrowserFolder?
   /// 目录请求代次：快速返回上一级时，避免旧请求的结果覆盖新目录。
   @State private var loadEpoch = 0
-  /// 待导入的目录：含子文件夹时先弹「目录结构」选择
+  /// 待导入的目录（单个或批量）：弹「目录结构」选择后执行
   @State private var importTarget: ImportTarget?
+  /// 多选模式：勾选多个文件夹，一次导入为多个书库
+  @State private var selecting = false
+  @State private var selectedIDs: Set<String> = []
 
   private struct ImportTarget: Identifiable {
-    let folder: CloudBrowserFolder
-    let name: String
-    var id: String { folder.id }
+    let folders: [CloudBrowserFolder]
+    let title: String
+    /// 同目录内 id 唯一：首项 id + 数量即可区分不同选择，
+    /// 避免全部 id 拼接的超长 key 与 "a|b"+"c" == "a"+"b|c" 的歧义
+    var id: String { "\(folders.count)@\(folders.first?.id ?? "")" }
   }
 
   private var isCloud189: Bool { source.kind == "cloud189" }
@@ -49,6 +54,21 @@ struct CloudBrowserView: View {
     if let last = path.last { return last.name }
     let scopeName = scope?.name ?? ""
     return scopeName.isEmpty ? source.name : scopeName
+  }
+
+  private var directoryItems: [CloudBrowserItem] {
+    items.filter(\.isDirectory)
+  }
+
+  /// 勾选中的文件夹（与当前目录 items 对齐）
+  private var selectedFolders: [CloudBrowserFolder] {
+    directoryItems
+      .filter { selectedIDs.contains($0.id) }
+      .map { CloudBrowserFolder(id: $0.id, name: $0.name, familyId: scope?.familyId) }
+  }
+
+  private func isMounted(_ folder: CloudBrowserFolder) -> Bool {
+    mountedKeys.contains(provider?.mountKey(for: folder) ?? "")
   }
 
   var body: some View {
@@ -102,6 +122,26 @@ struct CloudBrowserView: View {
           }
         }
       }
+      if selecting {
+        ToolbarItem(placement: .topBarLeading) {
+          Button {
+            toggleSelectAll()
+          } label: {
+            Text(directoryItems.allSatisfy { selectedIDs.contains($0.id) } ? "取消全选" : "全选")
+          }
+        }
+      }
+      if !directoryItems.isEmpty {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button {
+            selecting.toggle()
+            if !selecting { selectedIDs = [] }
+          } label: {
+            Text(selecting ? "完成" : "选择")
+          }
+          .accessibilityLabel(selecting ? "退出选择模式" : "批量选择文件夹")
+        }
+      }
     }
     .overlay {
       if busy {
@@ -139,9 +179,9 @@ struct CloudBrowserView: View {
     }
     .safeAreaInset(edge: .bottom) { importBar }
     .sheet(item: $importTarget) { target in
-      LibraryScanLayoutPicker(folderName: target.name) { layout in
+      LibraryScanLayoutPicker(folderName: target.title) { layout in
         importTarget = nil
-        Task { await performImport(target.folder, name: target.name, layout: layout) }
+        Task { await performImport(target.folders, title: target.title, layout: layout) }
       }
     }
     .onAppear { refreshCachedSet() }
@@ -158,12 +198,22 @@ struct CloudBrowserView: View {
 
   // MARK: - 行
 
+  @ViewBuilder
   private func folderRow(_ item: CloudBrowserItem) -> some View {
     let folder = CloudBrowserFolder(id: item.id, name: item.name, familyId: scope?.familyId)
-    let mounted = mountedKeys.contains(provider?.mountKey(for: folder) ?? "")
-    return Button {
-      path.append(item)
-      if let folder = currentFolder { Task { await load(folder) } }
+    let mounted = isMounted(folder)
+    let selected = selectedIDs.contains(item.id)
+    let row = Button {
+      if selecting {
+        if selected {
+          selectedIDs.remove(item.id)
+        } else {
+          selectedIDs.insert(item.id)
+        }
+      } else {
+        path.append(item)
+        if let folder = currentFolder { Task { await load(folder) } }
+      }
     } label: {
       HStack(spacing: 12) {
         Image(systemName: "folder.fill")
@@ -173,20 +223,34 @@ struct CloudBrowserView: View {
         if mounted {
           StatusPill(text: "已导入", color: YuduTheme.success, icon: "checkmark.seal.fill")
         }
-        Image(systemName: "chevron.right")
-          .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+        if selecting {
+          Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+            .font(.body.weight(.medium))
+            .foregroundStyle(selected ? YuduTheme.accent : YuduTheme.muted)
+        } else {
+          Image(systemName: "chevron.right")
+            .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+        }
       }
     }
-    .contextMenu {
-      Button {
-        importTarget = ImportTarget(folder: folder, name: item.name)
-      } label: {
-        Label("导入此文件夹为书库", systemImage: "plus.square.on.square")
-      }
-      Button {
-        previewRead(item)
-      } label: {
-        Label("在线试读此文件夹", systemImage: "book")
+    .accessibilityLabel(selecting
+      ? "\(item.name)，\(selected ? "已选中" : "未选中")"
+      : "打开文件夹 \(item.name)")
+    // 选择模式屏蔽长按菜单，避免误触「试读」打断批量操作
+    if selecting {
+      row
+    } else {
+      row.contextMenu {
+        Button {
+          importTarget = ImportTarget(folders: [folder], title: item.name)
+        } label: {
+          Label("导入此文件夹为书库", systemImage: "plus.square.on.square")
+        }
+        Button {
+          previewRead(item)
+        } label: {
+          Label("在线试读此文件夹", systemImage: "book")
+        }
       }
     }
   }
@@ -213,6 +277,9 @@ struct CloudBrowserView: View {
           .font(.caption).foregroundStyle(YuduTheme.accent)
       }
     }
+    // 文件不能挂载为书库，选择模式下不可点，避免误触试读
+    .disabled(selecting)
+    .opacity(selecting ? 0.45 : 1)
   }
 
   private var scopePicker: some View {
@@ -233,26 +300,54 @@ struct CloudBrowserView: View {
   }
 
   private var importBar: some View {
-    let mounted = currentFolder.map { mountedKeys.contains(provider?.mountKey(for: $0) ?? "") } ?? false
+    let selected = selectedFolders
+    let pending = selected.filter { !isMounted($0) }
+    let currentMounted = currentFolder.map { isMounted($0) } ?? false
+    let allSelectedMounted = !selected.isEmpty && pending.isEmpty
+    let icon: String
+    let label: String
+    if selecting {
+      if selected.isEmpty {
+        icon = "plus.square.on.square"
+        label = "勾选要导入的文件夹"
+      } else if allSelectedMounted {
+        icon = "checkmark.seal.fill"
+        label = "所选文件夹已导入"
+      } else {
+        // 计数按待导入（跳过已导入）的算，与实际执行一致
+        icon = "plus.square.on.square"
+        label = pending.count < selected.count
+          ? "导入 \(pending.count) 个文件夹（跳过已导入）"
+          : "导入 \(pending.count) 个文件夹为书库"
+      }
+    } else {
+      icon = currentMounted ? "checkmark.seal.fill" : "plus.square.on.square"
+      label = currentMounted ? "已导入为书库" : "导入当前文件夹为书库"
+    }
+    let disabled = importing || busy || provider == nil
+      || (selecting ? selected.isEmpty || allSelectedMounted : currentMounted)
     return Button {
       guard let folder = currentFolder else { return }
-      // 目录里有子文件夹时无法可靠区分「一部作品」还是「一个库」，交给用户选择
-      if items.contains(where: \.isDirectory) {
-        importTarget = ImportTarget(folder: folder, name: displayName)
+      if selecting, !selected.isEmpty {
+        // 目录结构选择一次应用到整批
+        importTarget = ImportTarget(folders: selected, title: "\(selected.count) 个文件夹")
+      } else if items.contains(where: \.isDirectory) {
+        // 目录里有子文件夹时无法可靠区分「一部作品」还是「一个库」，交给用户选择
+        importTarget = ImportTarget(folders: [folder], title: displayName)
       } else {
-        Task { await performImport(folder, name: displayName, layout: .multi) }
+        Task { await performImport([folder], title: displayName, layout: .multi) }
       }
     } label: {
       HStack(spacing: 8) {
         if importing { ProgressView().tint(YuduTheme.background) }
-        Image(systemName: mounted ? "checkmark.seal.fill" : "plus.square.on.square")
-        Text(mounted ? "已导入为书库" : "导入当前文件夹为书库")
+        Image(systemName: icon)
+        Text(label)
           .font(.subheadline.weight(.semibold))
       }
       .frame(maxWidth: .infinity)
     }
     .buttonStyle(OrbitalButtonStyle())
-    .disabled(importing || busy || provider == nil || mounted)
+    .disabled(disabled)
     .padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 12)
     .background {
       Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
@@ -269,6 +364,15 @@ struct CloudBrowserView: View {
     guard !path.isEmpty else { return }
     path.removeLast()
     if let folder = currentFolder { Task { await load(folder) } }
+  }
+
+  private func toggleSelectAll() {
+    let ids = directoryItems.map(\.id)
+    if ids.allSatisfy({ selectedIDs.contains($0) }) {
+      selectedIDs.subtract(ids)
+    } else {
+      selectedIDs.formUnion(ids)
+    }
   }
 
   private func setup() async {
@@ -324,6 +428,8 @@ struct CloudBrowserView: View {
     items = []
     cachedPaths = []
     loadRetryFolder = nil
+    selectedIDs = []
+    selecting = false
     do {
       let listed = try await provider.list(folder)
       guard epoch == loadEpoch, !Task.isCancelled else { return }
@@ -342,32 +448,85 @@ struct CloudBrowserView: View {
 
   // MARK: - 导入 / 试读
 
-  private func performImport(_ folder: CloudBrowserFolder, name: String, layout: LibraryScanLayout) async {
+  /// 挂载一个或多个文件夹为书库；已导入的自动跳过，每个书库的首次扫描排队后台执行
+  private func performImport(
+    _ folders: [CloudBrowserFolder], title: String, layout: LibraryScanLayout
+  ) async {
     guard provider != nil else { return }
     importing = true
     defer { importing = false }
-    let result: Result<LibraryEntity, Failure>
+
+    let pending = folders.filter { !isMounted($0) }
+    guard !pending.isEmpty else {
+      message = "所选文件夹都已导入过"
+      return
+    }
+
+    var ok = 0
+    var lastName: String?
+    var failures: [String] = []
+
     switch source.kind {
     case "webdav":
-      guard let url = URL(string: folder.id) else {
-        message = "目录地址无效"
+      guard let client = libraryService.webdavClient(for: source) else {
+        message = "WebDAV 账号配置无效"
         return
       }
-      result = await libraryService.addWebDAVLibrary(source: source, folderURL: url, layout: layout)
+      // 批量只在开头验证一次连接，逐个挂载时跳过 verify
+      do {
+        try await client.verify()
+      } catch {
+        message = error.localizedDescription
+        return
+      }
+      for folder in pending {
+        guard let url = URL(string: folder.id) else {
+          failures.append("\(folder.name)：目录地址无效")
+          continue
+        }
+        let result = await libraryService.addWebDAVLibrary(
+          source: source, folderURL: url, layout: layout, verifyConnection: false
+        )
+        switch result {
+        case .success(let library): ok += 1; lastName = library.name
+        case .failure(let failure): failures.append("\(folder.name)：\(failure.message)")
+        }
+      }
     case "cloud189":
-      result = await libraryService.addCloud189Library(
-        source: source, folderId: folder.id, familyId: folder.familyId, name: name, layout: layout
-      )
+      guard libraryService.cloud189Client(for: source).isLoggedIn else {
+        message = "天翼云盘未登录，请回资源库页重新登录"
+        return
+      }
+      for folder in pending {
+        let result = await libraryService.addCloud189Library(
+          source: source, folderId: folder.id, familyId: folder.familyId,
+          name: folder.name.isEmpty ? title : folder.name, layout: layout
+        )
+        switch result {
+        case .success(let library): ok += 1; lastName = library.name
+        case .failure(let failure): failures.append("\(folder.name)：\(failure.message)")
+        }
+      }
     default:
       return
     }
-    switch result {
-    case .success(let library):
-      withAnimation { toast = "已导入「\(library.name)」，正在后台扫描" }
-      refreshMounted()
-    case .failure(let failure):
-      message = failure.message
+
+    refreshMounted()
+    if ok > 0 {
+      let text: String
+      if pending.count == 1, let lastName {
+        text = "已导入「\(lastName)」，正在后台扫描"
+      } else {
+        text = "已导入 \(ok) 个文件夹，正在后台扫描"
+          + (failures.isEmpty ? "" : "，\(failures.count) 个失败")
+      }
+      withAnimation { toast = text }
     }
+    if !failures.isEmpty {
+      message = failures.prefix(5).joined(separator: "\n")
+    }
+    selecting = false
+    selectedIDs = []
   }
 
   /// 点开即读：同目录内可连读；散图文件夹整目录作为一章

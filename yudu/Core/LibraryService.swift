@@ -17,6 +17,9 @@ private nonisolated struct SeriesCoverSnapshot: Sendable {
 final class LibraryService {
 
   var isScanning = false
+  /// 用户请求取消当前扫描；云端扫描在目录边界检查（复用线程安全标记，
+  /// 避免给扫描器传捕获主线程状态的闭包）
+  private let scanCancelFlag = CancelFlag()
   var lastErrors: [String] = []
   /// 最近一次扫描的结果摘要（增量/完整、新增数量），给界面一个明确反馈
   var lastScanSummary: String?
@@ -347,15 +350,21 @@ final class LibraryService {
     Task { await rescan(library) }
   }
 
-  /// 在网盘账号下导入（挂载）WebDAV 目录为书库
-  func addWebDAVLibrary(source: SourceEntity, folderURL: URL, layout: LibraryScanLayout = .multi) async -> Result<LibraryEntity, Failure> {
+  /// 在网盘账号下导入（挂载）WebDAV 目录为书库。
+  /// 批量导入时调用方先验证一次连接，之后逐个挂载传 verifyConnection: false 跳过重复验证。
+  func addWebDAVLibrary(
+    source: SourceEntity, folderURL: URL, layout: LibraryScanLayout = .multi,
+    verifyConnection: Bool = true
+  ) async -> Result<LibraryEntity, Failure> {
     guard let client = webdavClient(for: source) else {
       return .failure(Failure("WebDAV 账号配置无效"))
     }
-    do {
-      try await client.verify()
-    } catch {
-      return .failure(Failure(error.localizedDescription))
+    if verifyConnection {
+      do {
+        try await client.verify()
+      } catch {
+        return .failure(Failure(error.localizedDescription))
+      }
     }
 
     let context = container.mainContext
@@ -492,12 +501,21 @@ final class LibraryService {
     }
   }
 
+  /// 取消当前扫描：云端扫描在目录边界响应，已扫到的部分按「不完整」保留（只更新不删除）。
+  func cancelScan() {
+    guard isScanning else { return }
+    scanCancelFlag.cancel()
+  }
+
   func rescan(_ library: LibraryEntity, mode: LibraryScanMode = .incremental) async {
     // 导入/挂载常常紧跟在另一次扫描之后；之前这里直接 return，会让刚导入的文件
     // 扫描不到但界面仍报成功。现在排队等当前扫描结束再执行。
     if isScanning { await waitForScanIdle() }
     guard !Task.isCancelled, !isScanning else { return }
     isScanning = true
+    // 只在开扫时复位（不在 defer 里）：rescanAll 靠它保持「已取消」状态
+    // 停止后面的库；下一次 rescan 开始时自然会清掉。
+    scanCancelFlag.reset()
     lastScanSummary = nil
     defer {
       isScanning = false
@@ -516,7 +534,8 @@ final class LibraryService {
       let report = await Cloud189Scanner.scanLibrary(
         client: client, rootFolderId: folderId, familyId: library.remoteFamilyId,
         libraryKey: library.key, libraryName: library.name, mode: mode,
-        layout: library.scanLayout
+        layout: library.scanLayout,
+        shouldCancel: { [scanCancelFlag] in scanCancelFlag.isCancelled }
       ) { current, total, title in
         Task { @MainActor in
           self.scanProgress = ScanProgressInfo(current: current, total: total, title: title)
@@ -525,6 +544,7 @@ final class LibraryService {
       }
       apply(report: report, to: library, mode: mode)
       lastErrors = report.errors
+      if scanCancelFlag.isCancelled { lastScanSummary = "扫描已取消（已扫到的内容已保留）" }
       await generateMissingCovers(for: library, root: nil, cloud189Client: client)
       return
     }
@@ -539,10 +559,12 @@ final class LibraryService {
       ScanLiveActivity.begin(libraryName: library.name)
       let report = await WebDAVScanner.scanLibrary(
         client: client, root: root, libraryKey: library.key, libraryName: library.name,
-        mode: mode, layout: library.scanLayout
+        mode: mode, layout: library.scanLayout,
+        shouldCancel: { [scanCancelFlag] in scanCancelFlag.isCancelled }
       )
       apply(report: report, to: library, mode: mode)
       lastErrors = report.errors
+      if scanCancelFlag.isCancelled { lastScanSummary = "扫描已取消（已扫到的内容已保留）" }
       await generateMissingCovers(for: library, root: nil, webdavClient: client)
       return
     }
@@ -593,9 +615,13 @@ final class LibraryService {
     for library in libraries {
       await rescan(library, mode: mode)
       errors += lastErrors.map { "\(library.name)：\($0)" }
+      // 用户取消后不再开下一个库的扫描（标记由下一次 rescan 开扫时复位）
+      if scanCancelFlag.isCancelled { break }
     }
     lastErrors = errors
-    if libraries.isEmpty {
+    if scanCancelFlag.isCancelled {
+      lastScanSummary = "扫描已取消（已扫到的内容已保留）"
+    } else if libraries.isEmpty {
       lastScanSummary = "还没有可扫描的书库"
     } else {
       lastScanSummary = "\(mode.label)扫描完成：共 \(libraries.count) 个来源"

@@ -26,6 +26,7 @@ nonisolated enum Cloud189Scanner {
   static func scanLibrary(
     client: Cloud189Client, rootFolderId: String, familyId: String?, libraryKey: String, libraryName: String,
     mode: LibraryScanMode = .incremental, layout: LibraryScanLayout = .multi,
+    shouldCancel: (@Sendable () -> Bool)? = nil,
     onProgress: (@Sendable (Int, Int, String) -> Void)? = nil
   ) async -> ScanReport {
     var errors: [String] = []
@@ -49,6 +50,12 @@ nonisolated enum Cloud189Scanner {
     var dirEntries: [String: CachedChildScan] = [:]
     for (index, dir) in rootDirs.enumerated() {
       await ReaderActivity.waitWhileReading()
+      // 用户取消：按「不完整」收尾，已扫到的部分照常保存与装配
+      if shouldCancel?() == true {
+        isComplete = false
+        errors.append("扫描已取消")
+        break
+      }
       onProgress?(index, total, "检查目录：\(dir.name)")
       let fingerprint = fingerprint(of: dir)
       if let cached = previousCache[dir.id],
@@ -59,7 +66,8 @@ nonisolated enum Cloud189Scanner {
       }
       guard let entry = await scanRootDirectory(
         client: client, dir: dir, familyId: familyId, libraryKey: libraryKey,
-        previousPages: previousCache[dir.id]?.folderPages ?? [:], mode: mode
+        previousPages: previousCache[dir.id]?.folderPages ?? [:], mode: mode,
+        shouldCancel: shouldCancel
       ) else {
         errors.append("目录读取失败：\(dir.name)")
         isComplete = false
@@ -111,7 +119,8 @@ nonisolated enum Cloud189Scanner {
   /// 多系列布局 → series；单系列布局 → chapters。
   private static func scanRootDirectory(
     client: Cloud189Client, dir: Cloud189Item, familyId: String?, libraryKey: String,
-    previousPages: [String: CachedFolderPages], mode: LibraryScanMode
+    previousPages: [String: CachedFolderPages], mode: LibraryScanMode,
+    shouldCancel: (@Sendable () -> Bool)? = nil
   ) async -> CachedChildScan? {
     await ReaderActivity.waitWhileReading()
     guard let children = try? await client.listFiles(folderId: dir.id, familyId: familyId) else {
@@ -135,6 +144,11 @@ nonisolated enum Cloud189Scanner {
         var volumes: [Cloud189Item] = []
         for sub in subDirs {
           await ReaderActivity.waitWhileReading()
+          if shouldCancel?() == true {
+            complete = false
+            allVolumes = false
+            break
+          }
           guard let stats = await folderStats(
             client: client, folder: sub, familyId: familyId,
             previous: previousPages, cache: &pageCache, mode: mode
@@ -170,7 +184,7 @@ nonisolated enum Cloud189Scanner {
 
     let (series, seriesComplete) = await makeSeries(
       client: client, folder: dir, children: children, familyId: familyId, libraryKey: libraryKey,
-      previous: previousPages, cache: &pageCache, mode: mode
+      previous: previousPages, cache: &pageCache, mode: mode, shouldCancel: shouldCancel
     )
     if !seriesComplete { complete = false }
 
@@ -188,7 +202,8 @@ nonisolated enum Cloud189Scanner {
 
   private static func makeSeries(
     client: Cloud189Client, folder: Cloud189Item, children: [Cloud189Item], familyId: String?, libraryKey: String,
-    previous: [String: CachedFolderPages], cache: inout [String: CachedFolderPages], mode: LibraryScanMode
+    previous: [String: CachedFolderPages], cache: inout [String: CachedFolderPages], mode: LibraryScanMode,
+    shouldCancel: (@Sendable () -> Bool)? = nil
   ) async -> (ScannedSeries?, Bool) {
     var chapters: [ScannedChapter] = []
     var looseImages = 0
@@ -196,6 +211,10 @@ nonisolated enum Cloud189Scanner {
 
     for child in children {
       await ReaderActivity.waitWhileReading()
+      if shouldCancel?() == true {
+        complete = false
+        break
+      }
       if child.isDirectory {
         guard let stats = await folderStats(
           client: client, folder: child, familyId: familyId,

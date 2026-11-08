@@ -65,6 +65,11 @@ struct BookshelfView: View {
               ProgressView().tint(YuduTheme.accent)
               Text(libraryService.scanProgress.map { "\($0.title)（\($0.current + 1)/\($0.total)）" } ?? "正在扫描书库与生成封面…")
                 .font(.caption)
+              Spacer()
+              Button("取消") { libraryService.cancelScan() }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(YuduTheme.accent)
+                .frame(minHeight: 44)
             }
             .foregroundStyle(YuduTheme.muted)
           } else if let summary = libraryService.lastScanSummary {

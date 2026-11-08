@@ -8,7 +8,8 @@ nonisolated enum WebDAVScanner {
 
   static func scanLibrary(
     client: WebDAVClient, root: URL, libraryKey: String, libraryName: String,
-    mode: LibraryScanMode = .incremental, layout: LibraryScanLayout = .multi
+    mode: LibraryScanMode = .incremental, layout: LibraryScanLayout = .multi,
+    shouldCancel: (@Sendable () -> Bool)? = nil
   ) async -> ScanReport {
     var errors: [String] = []
     var isComplete = true
@@ -30,6 +31,12 @@ nonisolated enum WebDAVScanner {
     // 根目录子项逐个比对指纹：没变化就直接复用上次结果，不再下钻。
     for item in rootItems.sorted(by: { naturalCompare($0.name, $1.name) }) {
       await ReaderActivity.waitWhileReading()
+      // 用户取消：按「不完整」收尾，已扫到的部分照常保存与装配
+      if shouldCancel?() == true {
+        isComplete = false
+        errors.append("扫描已取消")
+        break
+      }
       let key = item.url.absoluteString
       let fingerprint = fingerprint(of: item)
       if let cached = previousCache[key],
@@ -42,7 +49,8 @@ nonisolated enum WebDAVScanner {
       if item.isDirectory {
         guard let entry = await classifyWebDAVDir(
           client: client, folder: item, libraryKey: libraryKey,
-          previousPages: previousCache[key]?.folderPages ?? [:], mode: mode
+          previousPages: previousCache[key]?.folderPages ?? [:], mode: mode,
+          shouldCancel: shouldCancel
         ) else {
           errors.append("目录读取失败：\(item.name)")
           isComplete = false
@@ -78,7 +86,8 @@ nonisolated enum WebDAVScanner {
   /// volume = 直接装着图片/包；wrapper = 子项全是「直接装媒体」的文件夹（卷壳）；series = 其余。
   private static func classifyWebDAVDir(
     client: WebDAVClient, folder: WebDAVItem, libraryKey: String,
-    previousPages: [String: CachedFolderPages], mode: LibraryScanMode
+    previousPages: [String: CachedFolderPages], mode: LibraryScanMode,
+    shouldCancel: (@Sendable () -> Bool)? = nil
   ) async -> CachedChildScan? {
     guard let children = try? await client.list(folder.url) else { return nil }
 
@@ -96,6 +105,11 @@ nonisolated enum WebDAVScanner {
         var allMedia = true
         for sub in subDirs {
           await ReaderActivity.waitWhileReading()
+          if shouldCancel?() == true {
+            complete = false
+            allMedia = false
+            break
+          }
           guard let stats = await imageStats(
             client: client, folder: sub, previous: previousPages, cache: &pageCache, mode: mode
           ) else {
@@ -123,7 +137,7 @@ nonisolated enum WebDAVScanner {
     // series 拆解（multi 布局用；single 布局也复用它的章节列表）
     let (series, seriesComplete) = await scanSeriesContent(
       client: client, folder: folder, children: children, libraryKey: libraryKey,
-      previousPages: previousPages, cache: &pageCache, mode: mode
+      previousPages: previousPages, cache: &pageCache, mode: mode, shouldCancel: shouldCancel
     )
     if !seriesComplete { complete = false }
 
@@ -143,13 +157,18 @@ nonisolated enum WebDAVScanner {
   private static func scanSeriesContent(
     client: WebDAVClient, folder: WebDAVItem, children: [WebDAVItem], libraryKey: String,
     previousPages: [String: CachedFolderPages],
-    cache: inout [String: CachedFolderPages], mode: LibraryScanMode
+    cache: inout [String: CachedFolderPages], mode: LibraryScanMode,
+    shouldCancel: (@Sendable () -> Bool)? = nil
   ) async -> (ScannedSeries?, Bool) {
     var chapters: [ScannedChapter] = []
     var complete = true
 
     for child in children {
       await ReaderActivity.waitWhileReading()
+      if shouldCancel?() == true {
+        complete = false
+        break
+      }
       if child.isDirectory {
         guard let stats = await imageStats(
           client: client, folder: child, previous: previousPages, cache: &cache, mode: mode

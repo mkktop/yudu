@@ -12,6 +12,11 @@ nonisolated final class CancelFlag: @unchecked Sendable {
   func cancel() {
     lock.withLock { cancelled = true }
   }
+
+  /// 复位（新一轮工作开始前）
+  func reset() {
+    lock.withLock { cancelled = false }
+  }
 }
 
 /// 页图的同步加载 / 解压 / 解码专用有界线程池。
